@@ -26,7 +26,7 @@ WANDB_PROJECT=hybrid_trainer_toys
 HAS_GROUP_NOMR=""
 FREEZE_MLP=""
 TEACHER_MODEL_ID=""
-while getopts "c:o:p:n:m:b:a:l:f:w:k:g:d:F:s:R:W:S:t:T:W:P:r:G:M:z:i:" opt; do
+while getopts "c:o:p:n:m:b:a:l:f:w:k:g:d:F:s:R:W:S:t:T:W:P:r:G:M:z:i:D:" opt; do
     case $opt in
         c) CONFIG_FILE="$OPTARG";;
         o) OUTPUT_DIR="$OPTARG";;
@@ -50,7 +50,7 @@ while getopts "c:o:p:n:m:b:a:l:f:w:k:g:d:F:s:R:W:S:t:T:W:P:r:G:M:z:i:" opt; do
         t) MAX_TRAINED_TOKENS="$OPTARG";;
         T) TERMINATE_LOSS="$OPTARG";;
         P) WANDB_PROJECT="$OPTARG";;
-        W) WANDB="$OPTARG";;
+        D) WANDB="$OPTARG";;
         G) GPUS_PER_NODE="$OPTARG";;
         M) HAS_GROUP_NOMR="--has_group_norm";;
         z) FREEZE_MLP="--freeze_mlp";;

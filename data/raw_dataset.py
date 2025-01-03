@@ -47,7 +47,8 @@ def check_feature(dataset):
     if the feature contains text and the value is a string, return "text"
     """
     for feature, value in dataset[0].items():
-        if feature == 'messages' and isinstance(value, list):
+        if (feature == 'messages' and isinstance(value, list)) or \
+            ("conversations" in feature and isinstance(value, list)):
             return 'conversation'
         if feature == 'text' and isinstance(value, str):
             return 'text'
@@ -70,10 +71,29 @@ def convert_conversation_to_text(example: Dict) -> Dict:
         A dictionary with a single 'text' key containing the ChatML formatted conversation
     """
     result = []
-    for message in example['messages']:
+    if "messages" in example:
+        messages = example["messages"]
+    elif "conversations" in example:
+        messages = example["conversations"]
+    for message in messages:
+        if 'role' in message:
+            role = message['role']
+        elif 'from' in message:
+            role = message['from']
+        role = role.lower()
+        
+        if 'content' in message:
+            content = message['content']
+        elif 'value' in message:
+            content = message['value']
+        
+        if role == 'human':
+            role = 'user'
+        elif role == 'gpt':
+            role = 'assistant'
         result.extend([
-            f"<|im_start|>{message['role']}\n",
-            f"{message['content']}\n",
+            f"<|im_start|>{role}\n",
+            f"{content}\n",
             "<|im_end|>\n"
         ])
     
@@ -213,7 +233,7 @@ if __name__ == '__main__':
     print(dataset)
     print(check_feature(dataset))
     print(dataset[0]['text'])
-    directories = ['/home/yueyulin/data/finemath/finemath-4plus/', '/home/yueyulin/data/Mobius/standard/']
+    directories = ['/home/yueyulin/data/Magpie-Qwen2.5-Pro-1M-v0.1/data','/home/yueyulin/data/finemath/finemath-4plus/', '/home/yueyulin/data/Mobius/standard/']
     
     all_ds = load_datasets_from_directories(directories)
     print(all_ds)

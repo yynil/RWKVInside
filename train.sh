@@ -24,7 +24,9 @@ TERMINATE_LOSS=0.01
 WANDB=hybrid_trainer_toys
 WANDB_PROJECT=hybrid_trainer_toys
 HAS_GROUP_NOMR=""
-while getopts "c:o:p:n:m:b:a:l:f:w:k:g:d:F:s:R:W:S:t:T:W:P:r:G:M:" opt; do
+FREEZE_MLP=""
+TEACHER_MODEL_ID=""
+while getopts "c:o:p:n:m:b:a:l:f:w:k:g:d:F:s:R:W:S:t:T:W:P:r:G:M:z:i:" opt; do
     case $opt in
         c) CONFIG_FILE="$OPTARG";;
         o) OUTPUT_DIR="$OPTARG";;
@@ -51,6 +53,8 @@ while getopts "c:o:p:n:m:b:a:l:f:w:k:g:d:F:s:R:W:S:t:T:W:P:r:G:M:" opt; do
         W) WANDB="$OPTARG";;
         G) GPUS_PER_NODE="$OPTARG";;
         M) HAS_GROUP_NOMR="--has_group_norm";;
+        z) FREEZE_MLP="--freeze_mlp";;
+        i) TEACHER_MODEL_ID="--teacher_model_id $OPTARG";;
         \?) echo "无效的选项 -$OPTARG" >&2; exit 1;;
     esac
 done
@@ -91,4 +95,6 @@ deepspeed \
     $CKPT_FILE \
     --stage $STAGE \
     --terminate_at_loss $TERMINATE_LOSS \
-    --max_trained_tokens $MAX_TRAINED_TOKENS 
+    --max_trained_tokens $MAX_TRAINED_TOKENS \
+    $FREEZE_MLP \
+    $TEACHER_MODEL_ID

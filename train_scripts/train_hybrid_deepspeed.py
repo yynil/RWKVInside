@@ -31,7 +31,7 @@ import torch
 import deepspeed
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from hybrid_model import HybridModel,VFirstHolder
-from train_functions import configure_optimizer, train_step, validation_step
+from train_functions import configure_optimizer, train_step
 import datasets
 import json
 import math
@@ -57,6 +57,8 @@ def create_arg_parser():
     parser.add_argument('--has_group_norm', action='store_true',default=False,help='whether the Time Mixer has group norm')
     parser.add_argument('--min_len', type=int, default=0, help='minimum length of the input')
     parser.add_argument('--max_len', type=int, default=4096, help='maximum length of the input')
+    parser.add_argument('--freeze_mlp', action='store_true',default=False,help='freeze the mlp layer')
+    parser.add_argument('--teacher_model_id', type=str, default=None, help='teacher model id used to distill in stage2')
     
     parser.add_argument('--dropout', type=float, default=0, help='dropout rate in the model')
     parser.add_argument('--grad_cp', type=int, default=0, help='gradient checkpoint in the model')
@@ -311,7 +313,7 @@ if __name__ == '__main__':
     
     # 加载模型和分词器
     transformer_model = AutoModelForCausalLM.from_pretrained(config['Llama']['model_id'],
-                                                            torch_dtype=dtype, device_map='cpu',low_cpu_mem_usage=True, attn_implementation='flash_attention_2')
+                                                            torch_dtype=dtype, device_map='cpu',low_cpu_mem_usage=True)
     tokenizer = AutoTokenizer.from_pretrained(config['Llama']['model_id'])
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -337,25 +339,11 @@ if __name__ == '__main__':
     args.ce_weight = config['ce_weight']
     args.model_file = config['model_file']
     args.real_bsz = args.train_batch_size
-    args.teacher_client_mode = config['teach_mode']['is_client']
-    args.is_hidden_align = config['teach_mode']['is_hidden_align']
     args.is_sft = config.get('is_sft', False)
-    args.is_llama_ffn = config.get('is_llama_ffn', False)
-    args.is_rwkv_att_only = config.get('is_rwkv_att_only', False)
     args.is_all_labels_kl = config.get('is_all_labels_kl', False)
-    args.init_with_llama = config.get('init_with_llama', False)
 
-    # # 初始化教师模型
-    # if not args.teacher_client_mode:
-    #     teacher_model = AutoModelForCausalLM.from_pretrained(config['Llama']['model_id'], torch_dtype=dtype, attn_implementation='flash_attention_2')
-    #     teacher_model.eval()
-    # else:
-    #     teacher_model = None
-    #     args.groups = config['teach_mode']['groups']
-    # if args.teacher_client_mode:
-    #     args.groups = config['teach_mode']['groups']
     # 初始化混合模型
-    if args.stage == 1 and args.is_rwkv_att_only:
+    if args.stage == 1:
         teacher_attn_module_list = torch.nn.ModuleList()
         for layer_idx in range(transformer_model.config.num_hidden_layers):
             llama_layer = transformer_model.model.layers[layer_idx]
@@ -374,11 +362,15 @@ if __name__ == '__main__':
     # 设置模型参数的训练状态
     if args.stage == 2 or args.stage == 3:#3 means sft
         print('all params are trainable')
+        print(f'freeze mlp is {args.freeze_mlp}')
         if args.grad_cp == 1:
             print('enable gradient checkpointing')
             model.model.gradient_checkpointing_enable()
         for name, param in model.named_parameters():
-            param.requires_grad = True
+            if args.freeze_mlp and 'mlp' in name:
+                param.requires_grad = False
+            else:
+                param.requires_grad = True
     else:
         print(f'Only self_attn params are trainable')
         for name,param in model.named_parameters():
@@ -579,17 +571,15 @@ if __name__ == '__main__':
             )
             print(f'Zero 3 will potentially split different layers to different processes')
             for layer_idx in args.layers:
-                if args.is_rwkv_att_only:
-                    attn_wrapper = model_engine.module.model.model.layers[layer_idx].self_attn
-                    attn_wrapper.v_first_state = state_engine.module
+                attn_wrapper = model_engine.module.model.model.layers[layer_idx].self_attn
+                attn_wrapper.v_first_state = state_engine.module
             del vfirst_holder
         else:
             #Zero 2 will hold the model in one GPU process
             print(f'Zero 2 will hold the model in one GPU process,set the vfirst_holder to model_engine')
             for layer_idx in args.layers:
-                if args.is_rwkv_att_only:
-                    attn_wrapper = model_engine.module.model.model.layers[layer_idx].self_attn
-                    attn_wrapper.v_first_state = vfirst_holder
+                attn_wrapper = model_engine.module.model.model.layers[layer_idx].self_attn
+                attn_wrapper.v_first_state = vfirst_holder
         timer.initialize_with_engine(model_engine)
         #print current gpu memory
         if args.local_rank == 0:
@@ -628,17 +618,21 @@ if __name__ == '__main__':
             }
             if not args.deepspeed_offload:
                 ds_config['zero_optimization']['offload_param'] = None
-            
+            teacher_model_id = args.teacher_model_id
+            if teacher_model_id is None:
+                teacher_model_id = config['Llama']['model_id']
+            print(f'initializing teacher model with id {teacher_model_id}')
             teacher_model = AutoModelForCausalLM.from_pretrained(
-                config['Llama']['model_id'],
+                teacher_model_id,
                 torch_dtype=dtype,
                 device_map='cpu',
-                low_cpu_mem_usage=True,
-                attn_implementation='flash_attention_2'
+                low_cpu_mem_usage=True
             )
+            
             teacher_model.eval()
             if args.local_rank == 0:
                 print('freeze teacher_model')
+                print(f'teacher_model is {teacher_model}')
             for name, param in teacher_model.named_parameters():
                 param.requires_grad = False
             # 使用DeepSpeed包装teacher model

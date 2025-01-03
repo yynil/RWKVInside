@@ -1,0 +1,16 @@
+RWKV:
+  layers: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23]
+  grad_cp: 1
+
+Llama:
+  model_id: /home/yueyulin/models/Qwen2.5-0.5B-Instruct/
+is_llama_ffn: True
+kl_weight: 1
+ce_weight: 0
+model_file: QWen2.5-0.5B
+init_with_llama: False
+is_rwkv_att_only: True
+teach_mode:
+  is_client: False
+  is_hidden_align: False
+is_all_labels_kl: True

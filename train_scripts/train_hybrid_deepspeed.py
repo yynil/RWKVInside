@@ -359,9 +359,13 @@ if __name__ == '__main__':
             print(f'load model from {args.ckpt_file}, info is {info}')
             print(model)
             # 打印几个关键参数的统计信息
+            #print parameter:model.model.layers.27.self_attn.student_attn.ln_x.weight
+            pname = 'model.model.layers.27.self_attn.student_attn.ln_x.weight'
             for name, param in model.named_parameters():
-                if "self_attn" in name:
-                    print(f"Parameter {name}: mean={param.mean().item():.6f}, std={param.std().item():.6f}")
+                if name == pname:
+                    mean_of_param = param.mean().item()
+                    std_of_param = param.std().item()
+                    print(f"Parameter {name}: mean={mean_of_param:.6f}, std={std_of_param:.6f}")
         del dict_set
     # 设置模型参数的训练状态
     if args.stage == 2 or args.stage == 3:#3 means sft
@@ -520,15 +524,22 @@ if __name__ == '__main__':
         model_engine, optimizer, _, _ = deepspeed.initialize(
             model=model,  
             optimizer=optimizer,
-            config=ds_config,
-            model_parameters=model.parameters(),  # 确保添加这个参数
+            config=ds_config
         )
         # 添加验证代码
         if args.local_rank == 0:
             # 抽样检查几个关键权重的值
+            #get value of pname from zero api
             for name, param in model_engine.module.named_parameters():
-                if "self_attn" in name:  # 或其他关键层
-                    print(f"Parameter {name} stats: mean={param.mean().item()}, std={param.std().item()}")
+                if name == pname:
+                    # 只收集这一个参数
+                    with deepspeed.zero.GatheredParameters(param):
+                        print(f"Parameter {name}:")
+                        print(f"  - mean: {param.mean().item():.6f} versus {mean_of_param:.6f}")
+                        print(f"  - std: {param.std().item():.6f} versus {std_of_param:.6f}")
+                    break
+            
+            
         #we only init  teacher related stuff when is_sft is False
         #init the VFirstHolder with (B,T,C) shape
         vfirst_holder = VFirstHolder(args.micro_bsz, args.max_seq_length, args.dim_att)

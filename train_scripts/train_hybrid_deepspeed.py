@@ -358,6 +358,10 @@ if __name__ == '__main__':
         if args.local_rank == 0:
             print(f'load model from {args.ckpt_file}, info is {info}')
             print(model)
+            # 打印几个关键参数的统计信息
+            for name, param in model.named_parameters():
+                if "self_attn" in name:
+                    print(f"Parameter {name}: mean={param.mean().item():.6f}, std={param.std().item():.6f}")
         del dict_set
     # 设置模型参数的训练状态
     if args.stage == 2 or args.stage == 3:#3 means sft

@@ -352,21 +352,21 @@ if __name__ == '__main__':
             p.requires_grad = False
     model = HybridModel(transformer_model, args, tokenizer)
     model = model.to(dtype=torch.bfloat16)
+    pname = 'model.model.layers.27.self_attn.student_attn.ln_x.weight'
     if args.ckpt_file is not None:
         dict_set = torch.load(args.ckpt_file)
         info = model.load_state_dict(dict_set, strict=False)
-        pname = 'model.model.layers.27.self_attn.student_attn.ln_x.weight'
-        if args.local_rank == 0:
-            print(f'load model from {args.ckpt_file}, info is {info}')
-            print(model)
-            # 打印几个关键参数的统计信息
-            #print parameter:model.model.layers.27.self_attn.student_attn.ln_x.weight
-            for name, param in model.named_parameters():
-                if name == pname:
-                    mean_of_param = param.mean().item()
-                    std_of_param = param.std().item()
-                    print(f"Parameter {name}: mean={mean_of_param:.6f}, std={std_of_param:.6f}")
         del dict_set
+    if args.local_rank == 0:
+        print(f'load model from {args.ckpt_file}, info is {info}')
+        print(model)
+        # 打印几个关键参数的统计信息
+        #print parameter:model.model.layers.27.self_attn.student_attn.ln_x.weight
+        for name, param in model.named_parameters():
+            if name == pname:
+                mean_of_param = param.mean().item()
+                std_of_param = param.std().item()
+                print(f"Parameter {name}: mean={mean_of_param:.6f}, std={std_of_param:.6f}")
     # 设置模型参数的训练状态
     if args.stage == 2 or args.stage == 3:#3 means sft
         print('all params are trainable')

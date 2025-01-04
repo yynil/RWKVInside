@@ -355,10 +355,11 @@ if __name__ == '__main__':
     pname = 'model.model.layers.27.self_attn.student_attn.ln_x.weight'
     if args.ckpt_file is not None:
         dict_set = torch.load(args.ckpt_file)
-        info = model.load_state_dict(dict_set, strict=False)
+        info = model.load_state_dict(dict_set, strict=False)  
+        if args.local_rank == 0:
+            print(f'load model from {args.ckpt_file}, info is {info}')
         del dict_set
     if args.local_rank == 0:
-        print(f'load model from {args.ckpt_file}, info is {info}')
         print(model)
         # 打印几个关键参数的统计信息
         #print parameter:model.model.layers.27.self_attn.student_attn.ln_x.weight

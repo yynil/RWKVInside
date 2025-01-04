@@ -420,7 +420,7 @@ if __name__ == '__main__':
         if args.local_rank == 0:
             print(f'load preprocessed data from {args.preprocessed_data} done')
     elif args.raw_data is not None:
-        # print(f'load raw data from {args.raw_data}')
+        print(f'load raw data from {args.raw_data}')
         from data.raw_dataset import load_datasets_from_directories,StreamingCLMDataCollator
         all_ds = load_datasets_from_directories(args.raw_data)
         # print(all_ds)
@@ -502,6 +502,7 @@ if __name__ == '__main__':
             ds_config['zero_optimization']['offload_optimizer'] = None
             ds_config['zero_optimization']['offload_param'] = None
         # 手动配置优化器
+        print(f'configuring optimizer with args {args}')
         optimizer = configure_optimizer(model, args)
         if args.local_rank == 0:
             print(f'optimizer is {optimizer}')

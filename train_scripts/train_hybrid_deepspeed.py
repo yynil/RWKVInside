@@ -539,7 +539,7 @@ if __name__ == '__main__':
             
         #we only init  teacher related stuff when is_sft is False
         #init the VFirstHolder with (B,T,C) shape
-        vfirst_holder = VFirstHolder(args.micro_bsz, args.max_seq_length, args.dim_att)
+        vfirst_holder = VFirstHolder(args.micro_bsz, args.max_seq_length, args.dim_att,model_engine.world_size)
         vfirst_holder.requires_grad_(False)
         if args.deepspeed_stage == 3:
             ds_config_state = {
@@ -593,6 +593,7 @@ if __name__ == '__main__':
             for layer_idx in args.layers:
                 attn_wrapper = model_engine.module.model.model.layers[layer_idx].self_attn
                 attn_wrapper.v_first_state = state_engine.module
+                attn_wrapper.global_rank = model_engine.global_rank
             del vfirst_holder
         else:
             #Zero 2 will hold the model in one GPU process

@@ -68,11 +68,11 @@ logging.basicConfig(
 
 class VFirstHolder(nn.Module):
     
-    def __init__(self, batch_size: int, seq_length: int, hidden_size: int,dtype=torch.bfloat16):
+    def __init__(self, batch_size: int, seq_length: int, hidden_size: int,world_size: int,dtype=torch.bfloat16):
         super().__init__()
         self.shared_state = nn.Parameter(
             torch.zeros(
-                (batch_size, seq_length, hidden_size),
+                (world_size,batch_size, seq_length, hidden_size),
                 dtype=dtype
             ),
             requires_grad=False
@@ -91,6 +91,7 @@ class AttentionWrapper(nn.Module):
         self.student_attn.requires_grad_(True)
         self.add_module("student_attn", self.student_attn)
         self.v_first_state = None#v6 will benefit from v_first_state
+        self.global_rank = None
     
     def forward(self, 
         # hidden_states: torch.Tensor,
@@ -110,7 +111,7 @@ class AttentionWrapper(nn.Module):
         hidden_states = kwargs['hidden_states']
         past_key_value = kwargs.get("past_key_value", None)
         hidden_states = hidden_states.requires_grad_(True)
-        v_first = self.v_first_state.shared_state.data.clone()
+        v_first = self.v_first_state.shared_state.data[self.global_rank].clone()
         if self.args.grad_cp == 1:
             if is_rwkv_7:
                 student_hidden_states,v_first = deepspeed.checkpointing.checkpoint(self.student_attn, hidden_states, v_first)
@@ -121,7 +122,7 @@ class AttentionWrapper(nn.Module):
                 student_hidden_states,v_first = self.student_attn(hidden_states, v_first)
             else:
                 student_hidden_states = self.student_attn(hidden_states)
-        self.v_first_state.shared_state.data.copy_(v_first)
+        self.v_first_state.shared_state.data[self.global_rank].copy_(v_first)
         if self.args.stage != 1:
             return (student_hidden_states, None, past_key_value)
         # student_outputs = self.student_attn(hidden_states)

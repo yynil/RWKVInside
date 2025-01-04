@@ -217,47 +217,45 @@ def dpo_train_step(model, ref_model, batch, args):
 @time_function
 def train_step(model, batch, args, teacher_engine=None, tokenizer=None):
     input_ids = batch['input_ids']
-    labels = batch['labels']
-    # 处理 labels 不存在的情况
-    if 'labels' not in batch:
-        # 创建左移的 labels: 把 input_ids 往右补充一个 pad token,然后去掉最后一个 token
+    if 'labels' in batch:
+        labels = batch['labels']
+        # 验证labels的维度
+        if labels.shape != input_ids.shape:
+            raise ValueError(f"Labels shape {labels.shape} doesn't match input_ids shape {input_ids.shape}")
+    else:
+        # 直接创建左移的labels
         labels = torch.cat([input_ids[:, 1:], 
                           torch.full((input_ids.shape[0], 1), 
                                    tokenizer.pad_token_id, 
                                    device=input_ids.device)], dim=1)
-    else:
-        labels = batch['labels']
         
-    # 检查 labels 是否已经左移
-    # 通过比较第一个非pad位置的 token 是否相同来判断
-    first_nonpad_pos = (input_ids != tokenizer.pad_token_id).nonzero()[:, 1][0]
-    if input_ids[0, first_nonpad_pos] == labels[0, first_nonpad_pos]:
-        # labels 没有左移,需要左移 1 位
-        labels = torch.cat([labels[:, 1:], 
-                          torch.full((labels.shape[0], 1), 
-                                   tokenizer.pad_token_id, 
-                                   device=labels.device)], dim=1)
+
     attention_mask = torch.ne(input_ids, tokenizer.pad_token_id).to(input_ids.device)
 
-    if not args.is_sft:
-        
-        if args.stage == 2:
-            # rank0_print(f'calculate loss for stage 2, input_ids shape is {input_ids.shape}')
-            teacher_logits,  teacher_loss = get_teacher_outputs(teacher_engine, input_ids, attention_mask, labels, args)
-        
-        student_outputs = get_student_outputs(model, args, input_ids, labels, attention_mask)
-        
-        if args.stage == 2:
-            # rank0_print(f'calculate loss for stage 2, input_ids shape is {input_ids.shape}')
-            loss, kl_loss, student_cross_entropy_loss = compute_kl_loss(student_outputs, teacher_logits, labels, args)
-        else:
-            loss, kl_loss, student_cross_entropy_loss = get_attn_loss(input_ids, student_outputs)
-            # loss = compute_hidden_state_loss(student_outputs, teacher_hidden_states)
-            teacher_loss = None
-        return loss, teacher_loss, kl_loss, student_cross_entropy_loss
-    else:
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels, use_cache=False)
+    # 4. 根据不同模式处理
+    if args.is_sft:
+        outputs = model(input_ids=input_ids, 
+                       attention_mask=attention_mask, 
+                       labels=labels, 
+                       use_cache=False)
         return outputs.loss, None, None, None
+    
+    # 5. 非SFT模式的处理
+    if args.stage == 2:
+        teacher_logits, teacher_loss = get_teacher_outputs(
+            teacher_engine, input_ids, attention_mask, labels, args)
+        student_outputs = get_student_outputs(
+            model, args, input_ids, labels, attention_mask)
+        loss, kl_loss, student_ce_loss = compute_kl_loss(
+            student_outputs, teacher_logits, labels, args)
+    elif args.stage == 1:
+        student_outputs = get_student_outputs(
+            model, args, input_ids, labels, attention_mask)
+        loss, kl_loss, student_ce_loss = get_attn_loss(
+            input_ids, student_outputs)
+        teacher_loss = None
+        
+    return loss, teacher_loss, kl_loss, student_ce_loss
     
 @time_function
 def get_attn_loss(input_ids, student_outputs):
@@ -294,7 +292,6 @@ def get_teacher_outputs(teacher_model, input_ids, attention_mask, labels, args):
 def compute_kl_loss(student_outputs, teacher_logits, labels, args, chunk_size=4096):
     student_logits = student_outputs.logits  # shape: [batch_size, seq_len, vocab_size]
     student_cross_entropy_loss = student_outputs.loss
-    total_length = student_logits.size(1)
     
     # 先对整个序列计算 softmax，保证归一化范围一致
     log_probs_student = F.log_softmax(student_logits, dim=-1)  # 在词表维度上做 softmax
@@ -305,38 +302,11 @@ def compute_kl_loss(student_outputs, teacher_logits, labels, args, chunk_size=40
         teacher_logits = teacher_logits[:, :, :student_vocab_size]
     targets = F.softmax(teacher_logits, dim=-1)
     
-    if total_length <= chunk_size:
-        kl_loss = F.kl_div(
+    kl_loss = F.kl_div(
             log_probs_student,
             targets,
             reduction='batchmean'
         )
-    else:
-        # 分段计算总的 KL divergence
-        total_kl_div = 0
-        chunk_size = 256
-        num_chunks = (total_length + chunk_size - 1) // chunk_size
-        
-        for chunk_start in range(0, total_length, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, total_length)
-            # 取出已经计算好的 log_probs 和 targets
-            chunk_log_probs = log_probs_student[:, chunk_start:chunk_end, :]
-            chunk_targets = targets[:, chunk_start:chunk_end, :]
-            
-            # 计算当前段的 KL div 并累加
-            chunk_kl_div = F.kl_div(
-                chunk_log_probs,
-                chunk_targets,
-                reduction='none'  # 先不做 reduction
-            )
-            total_kl_div += chunk_kl_div.sum()  # 累加所有元素
-            
-            # 释放临时变量
-            del chunk_log_probs, chunk_targets
-        
-        # 最后统一做归一化，保证和整体计算结果一致
-        kl_loss = total_kl_div / (student_logits.size(0) * total_length * student_logits.size(2))
-    
     loss = args.kl_weight * kl_loss + args.ce_weight * student_cross_entropy_loss
     del student_logits, teacher_logits, labels, log_probs_student, targets
     return loss, kl_loss, student_cross_entropy_loss

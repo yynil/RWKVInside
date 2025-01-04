@@ -771,18 +771,7 @@ if __name__ == '__main__':
                 break
         
 
-        # 验证
-        if val_dataloader:
-            model_engine.eval()
-            val_losses = []
-            with torch.no_grad():
-                for batch in val_dataloader:
-                    batch = {k: v.to(model_engine.device) for k, v in batch.items()}
-                    result = validation_step(model_engine, batch, args, teacher_model, tokenizer)
-                    val_losses.append(result['val_loss'].item())
-            
-            avg_val_loss = sum(val_losses) / len(val_losses)
-            print(f"Epoch {epoch}, Validation Loss: {avg_val_loss}")
+
 
         # 保存检查点
         if args.output_dir:

@@ -93,8 +93,8 @@ def convert_conversation_to_text(example: Dict) -> Dict:
             role = 'assistant'
         result.extend([
             f"<|im_start|>{role}\n",
-            f"{content}\n",
-            "<|im_end|>\n"
+            f"{content}",
+            "<|im_end|>"
         ])
     
     return {'text': "".join(result)}
@@ -249,6 +249,9 @@ if __name__ == '__main__':
     data_loader = DataLoader(con_ds, batch_size=1, collate_fn=data_collator)
     for batch in data_loader:
         print(batch)
+        print(batch['input_ids'].tolist())
+        print(batch['attention_mask'].tolist())
+        print(batch['labels'].tolist())
         print(batch['input_ids'].shape)
         print(batch['attention_mask'].shape)
         print(batch['labels'].shape)

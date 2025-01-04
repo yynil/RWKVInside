@@ -416,10 +416,10 @@ if __name__ == '__main__':
         if args.local_rank == 0:
             print(f'load preprocessed data from {args.preprocessed_data} done')
     elif args.raw_data is not None:
-        print(f'load raw data from {args.raw_data}')
+        # print(f'load raw data from {args.raw_data}')
         from data.raw_dataset import load_datasets_from_directories,StreamingCLMDataCollator
         all_ds = load_datasets_from_directories(args.raw_data)
-        print(all_ds)
+        # print(all_ds)
         con_ds = datasets.concatenate_datasets(all_ds)
         data_collator = StreamingCLMDataCollator(tokenizer=tokenizer, max_length=args.max_seq_length)
         from torch.utils.data.distributed import DistributedSampler
@@ -439,8 +439,8 @@ if __name__ == '__main__':
             collate_fn=data_collator
         ) 
         val_dataloader = None
-        if args.local_rank == 0:
-            print(f'load preprocessed data from {args.raw_data} done') 
+        # if args.local_rank == 0:
+        #     print(f'load preprocessed data from {args.raw_data} done') 
 
     # 设置DeepSpeed配置
     if args.deepspeed:

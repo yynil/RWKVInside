@@ -26,13 +26,13 @@ def detect_format(directory) -> str:
     return 'unknown'
 def load_jsonl_dataset(file_path):
     jsonl_files = glob.glob(file_path+"/*.jsonl")
-    print(f'load jsonl files: {jsonl_files}')
+    # print(f'load jsonl files: {jsonl_files}')
     dataset = datasets.load_dataset('json', data_files=jsonl_files)['train']
     return dataset
 
 def load_parquet_dataset(file_path):
     parquet_files = glob.glob(file_path+"/*.parquet")
-    print(f'load parquet files: {parquet_files}')
+    # print(f'load parquet files: {parquet_files}')
     dataset = datasets.load_dataset('parquet', data_files=parquet_files)['train']
     return dataset
 
@@ -127,9 +127,9 @@ def load_datasets_from_directories(directories):
     all_ds = []
     for directory in directories:
         dataset_type = detect_format(directory)
-        print(f"Detected dataset type: {dataset_type}")
+        # print(f"Detected dataset type: {dataset_type}")
         if dataset_type == 'unknown':
-            print(f"Unknown dataset type for directory: {directory}")
+            # print(f"Unknown dataset type for directory: {directory}")
             continue
         ds = load_functions[dataset_type](directory)
         feature_type = check_feature(ds)
@@ -137,7 +137,7 @@ def load_datasets_from_directories(directories):
             ds = convert_conversational_ds_to_text(ds)
         else:
             ds = ds.select_columns(['text'])
-        print(f"Loaded dataset from directory: {directory}")
+        # print(f"Loaded dataset from directory: {directory}")
         all_ds.append(ds)
     return all_ds
 

@@ -299,7 +299,12 @@ def compute_kl_loss(student_outputs, teacher_logits, labels, args, chunk_size=40
     teacher_vocab_size = teacher_logits.size(-1)
     #if teacher_vocab_size > student_vocab_size, truncate teacher_logits brutally
     if teacher_vocab_size > student_vocab_size:
+        if args.local_rank == 0:
+            print(f"Truncating teacher logits from {teacher_vocab_size} to {student_vocab_size}")
         teacher_logits = teacher_logits[:, :, :student_vocab_size]
+    else:
+        if args.local_rank == 0:
+            print(f"Padding teacher logits from {teacher_vocab_size} to {student_vocab_size}")
     targets = F.softmax(teacher_logits, dim=-1)
     
     kl_loss = F.kl_div(

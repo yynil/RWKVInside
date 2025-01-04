@@ -517,7 +517,6 @@ if __name__ == '__main__':
             optimizer=optimizer,
             config=ds_config,
             model_parameters=model.parameters(),  # 确保添加这个参数
-            load_model=True  # 添加这个参数
         )
         # 添加验证代码
         if args.local_rank == 0:

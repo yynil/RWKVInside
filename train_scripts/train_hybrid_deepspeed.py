@@ -355,12 +355,12 @@ if __name__ == '__main__':
     if args.ckpt_file is not None:
         dict_set = torch.load(args.ckpt_file)
         info = model.load_state_dict(dict_set, strict=False)
+        pname = 'model.model.layers.27.self_attn.student_attn.ln_x.weight'
         if args.local_rank == 0:
             print(f'load model from {args.ckpt_file}, info is {info}')
             print(model)
             # 打印几个关键参数的统计信息
             #print parameter:model.model.layers.27.self_attn.student_attn.ln_x.weight
-            pname = 'model.model.layers.27.self_attn.student_attn.ln_x.weight'
             for name, param in model.named_parameters():
                 if name == pname:
                     mean_of_param = param.mean().item()
@@ -527,13 +527,10 @@ if __name__ == '__main__':
             config=ds_config
         )
         # 添加验证代码
-        if args.local_rank == 0:
-            # 抽样检查几个关键权重的值
-            #get value of pname from zero api
-            for name, param in model_engine.module.named_parameters():
-                if name == pname:
-                    # 只收集这一个参数
-                    with deepspeed.zero.GatheredParameters(param):
+        for name, param in model_engine.module.named_parameters():
+            if name == pname:
+                with deepspeed.zero.GatheredParameters(param):
+                    if args.local_rank == 0:  # 只在 rank 0 打印
                         print(f"Parameter {name}:")
                         print(f"  - mean: {param.mean().item():.6f} versus {mean_of_param:.6f}")
                         print(f"  - std: {param.std().item():.6f} versus {std_of_param:.6f}")

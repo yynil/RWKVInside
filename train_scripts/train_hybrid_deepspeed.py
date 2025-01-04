@@ -515,8 +515,16 @@ if __name__ == '__main__':
         model_engine, optimizer, _, _ = deepspeed.initialize(
             model=model,  
             optimizer=optimizer,
-            config=ds_config
+            config=ds_config,
+            model_parameters=model.parameters(),  # 确保添加这个参数
+            load_model=True  # 添加这个参数
         )
+        # 添加验证代码
+        if args.local_rank == 0:
+            # 抽样检查几个关键权重的值
+            for name, param in model_engine.module.named_parameters():
+                if "self_attn" in name:  # 或其他关键层
+                    print(f"Parameter {name} stats: mean={param.mean().item()}, std={param.std().item()}")
         #we only init  teacher related stuff when is_sft is False
         #init the VFirstHolder with (B,T,C) shape
         vfirst_holder = VFirstHolder(args.micro_bsz, args.max_seq_length, args.dim_att)

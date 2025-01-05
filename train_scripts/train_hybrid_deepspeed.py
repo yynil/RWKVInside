@@ -352,7 +352,7 @@ if __name__ == '__main__':
             p.requires_grad = False
     model = HybridModel(transformer_model, args, tokenizer)
     model = model.to(dtype=torch.bfloat16)
-    pname = 'model.model.layers.27.self_attn.student_attn.ln_x.weight'
+    pname = 'model.model.layers.15.self_attn.student_attn.receptance.weight'
     if args.ckpt_file is not None:
         dict_set = torch.load(args.ckpt_file)
         info = model.load_state_dict(dict_set, strict=False)  

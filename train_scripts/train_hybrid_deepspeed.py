@@ -426,20 +426,25 @@ if __name__ == '__main__':
             print(f'load preprocessed data from {args.preprocessed_data} done')
     elif args.raw_data is not None:
         print(f'load raw data from {args.raw_data}')
-        from data.raw_dataset import load_datasets_from_directories,StreamingCLMDataCollator
-        all_ds = load_datasets_from_directories(args.raw_data)
+        from data.raw_dataset import load_datasets_from_directories,TypedDataset,TypedStreamingCLMDataCollator
+        all_ds,feature_types = load_datasets_from_directories(args.raw_data)
+        typed_dataset = TypedDataset(all_ds, feature_types)
         # print(all_ds)
-        con_ds = datasets.concatenate_datasets(all_ds)
-        data_collator = StreamingCLMDataCollator(tokenizer=tokenizer, max_length=args.max_seq_length)
+        # con_ds = datasets.concatenate_datasets(all_ds)
+        # data_collator = StreamingCLMDataCollator(tokenizer=tokenizer, max_length=args.max_seq_length)
+        data_collator = TypedStreamingCLMDataCollator(tokenizer=tokenizer, 
+                                                  max_length=args.max_seq_length, 
+                                                  min_length=args.max_seq_length, 
+                                                  typed_dataset=typed_dataset)
         from torch.utils.data.distributed import DistributedSampler
         train_sampler = DistributedSampler(
-            con_ds,
+            typed_dataset,
             num_replicas=args.world_size,
             rank=args.local_rank,
             shuffle=True
         )
         train_dataloader = torch.utils.data.DataLoader(
-            con_ds, 
+            typed_dataset, 
             batch_size=args.micro_bsz, 
             sampler=train_sampler,  # 使用分布式 sampler
             num_workers=4, 

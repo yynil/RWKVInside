@@ -124,6 +124,7 @@ def load_datasets_from_directories(directories):
     Returns:
     A list of datasets.
     """
+    feature_types = []
     all_ds = []
     for directory in directories:
         dataset_type = detect_format(directory)
@@ -133,13 +134,14 @@ def load_datasets_from_directories(directories):
             continue
         ds = load_functions[dataset_type](directory)
         feature_type = check_feature(ds)
+        feature_types.append(feature_type)
         if feature_type == 'conversation':
             ds = convert_conversational_ds_to_text(ds)
         else:
             ds = ds.select_columns(['text'])
         # print(f"Loaded dataset from directory: {directory}")
         all_ds.append(ds)
-    return all_ds
+    return all_ds,feature_types
 
 @dataclass
 class StreamingCLMDataCollator:
@@ -209,50 +211,201 @@ class StreamingCLMDataCollator:
             "attention_mask": attention_mask,
             "labels": labels,
         }       
-if __name__ == '__main__':
-    directory = '/home/yueyulin/data/finemath/finemath-4plus/'
-    dataset_type = detect_format(directory)
-    print(f"Detected dataset type: {dataset_type}")
-    dataset = load_functions[dataset_type](directory)
-    print(dataset)
-    #find unique value of language
-    print(dataset.unique('language'))
-    print(dataset[0]['text'])
-    print(check_feature(dataset))
-    dataset = dataset.select_columns(['text'])
-    print(dataset[0]['text'])
-    print(dataset)
+
+import itertools
+import random
+from typing import Optional, Dict, List, Union, Tuple
+from torch.utils.data import Dataset
+class TypedDataset(Dataset):
+    def __init__(self, all_ds: List[datasets.Dataset], feature_types: List[str]):
+        super().__init__()
+        
+        self.conversation_datasets = []
+        self.text_datasets = []
+        
+        for ds, ds_type in zip(all_ds, feature_types):
+            if ds_type == 'conversation':
+                self.conversation_datasets.append(ds)
+            else:
+                self.text_datasets.append(ds)
+        
+        self.conversation_lengths = [len(ds) for ds in self.conversation_datasets]
+        self.text_lengths = [len(ds) for ds in self.text_datasets]
+        
+        self.total_conversation = sum(self.conversation_lengths)
+        self.total_text = sum(self.text_lengths)
+        self.total_length = self.total_conversation + self.total_text
+        
+        self.conversation_offsets = [0] + list(itertools.accumulate(self.conversation_lengths))
+        self.text_offsets = [0] + list(itertools.accumulate(self.text_lengths))
     
-    directory = '/home/yueyulin/data/Mobius/standard/'
-    dataset_type = detect_format(directory)
-    print(f"Detected dataset type: {dataset_type}")
-    dataset = load_functions[dataset_type](directory)
-    print(dataset)
-    print(check_feature(dataset))
-    dataset = convert_conversational_ds_to_text(dataset)
-    print(dataset)
-    print(check_feature(dataset))
-    print(dataset[0]['text'])
+    def __len__(self) -> int:
+        return self.total_length
+    
+    def _get_dataset_and_local_idx(self, idx: int) -> Tuple[datasets.Dataset, int, bool]:
+        if idx < self.total_conversation:
+            for ds_idx, offset in enumerate(self.conversation_offsets[1:]):
+                if idx < offset:
+                    local_idx = idx - self.conversation_offsets[ds_idx]
+                    return self.conversation_datasets[ds_idx], local_idx, True
+        else:
+            idx = idx - self.total_conversation
+            for ds_idx, offset in enumerate(self.text_offsets[1:]):
+                if idx < offset:
+                    local_idx = idx - self.text_offsets[ds_idx]
+                    return self.text_datasets[ds_idx], local_idx, False
+        
+        raise IndexError(f"Failed to map index {idx}")
+
+    def __getitem__(self, idx: int) -> Dict:
+        dataset, local_idx, is_conversation = self._get_dataset_and_local_idx(idx)
+        item = dataset[local_idx]
+        return {
+            'text': item['text'],
+            'is_conversation': is_conversation,
+            'dataset_index': idx
+        }
+    
+    def get_random_sample(self, is_conversation: bool) -> Tuple[str, bool]:
+        """Get a random sample and its type"""
+        try:
+            if is_conversation and self.conversation_datasets:
+                ds_idx = random.randrange(len(self.conversation_datasets))
+                local_idx = random.randrange(len(self.conversation_datasets[ds_idx]))
+                return self.conversation_datasets[ds_idx][local_idx]['text'], True
+            elif not is_conversation and self.text_datasets:
+                ds_idx = random.randrange(len(self.text_datasets))
+                local_idx = random.randrange(len(self.text_datasets[ds_idx]))
+                return self.text_datasets[ds_idx][local_idx]['text'], False
+        except (ValueError, IndexError):
+            # Fallback to any available type
+            if self.conversation_datasets:
+                ds_idx = random.randrange(len(self.conversation_datasets))
+                local_idx = random.randrange(len(self.conversation_datasets[ds_idx]))
+                return self.conversation_datasets[ds_idx][local_idx]['text'], True
+            elif self.text_datasets:
+                ds_idx = random.randrange(len(self.text_datasets))
+                local_idx = random.randrange(len(self.text_datasets[ds_idx]))
+                return self.text_datasets[ds_idx][local_idx]['text'], False
+            
+        raise ValueError("No datasets available for sampling")
+
+@dataclass
+class TypedStreamingCLMDataCollator:
+    tokenizer: PreTrainedTokenizer
+    max_length: int
+    min_length: int
+    typed_dataset: TypedDataset
+    pad_to_multiple_of: Optional[int] = None
+    
+    def concatenate_if_needed(self, text: str, is_conversation: bool) -> str:
+        """Concatenate text with random samples of the same type if it's too short"""
+        tokens = self.tokenizer(text, truncation=False)
+        current_length = len(tokens['input_ids'])
+        
+        max_attempts = 5
+        attempts = 0
+        
+        while current_length < self.min_length and attempts < max_attempts:
+            sample_text, sample_is_conversation = self.typed_dataset.get_random_sample(is_conversation)
+            
+            if is_conversation:
+                text += sample_text
+            else:
+                text += "\n\n" + sample_text
+            
+            tokens = self.tokenizer(text, truncation=False)
+            current_length = len(tokens['input_ids'])
+            attempts += 1
+                
+        return text
+    
+    def __call__(self, examples: List[Dict[str, Union[str, List[str]]]]) -> Dict[str, torch.Tensor]:
+        texts = []
+        for example in examples:
+            text = example['text'] if isinstance(example['text'], str) else example['text'][0]
+            processed_text = self.concatenate_if_needed(text, example['is_conversation'])
+            texts.append(processed_text)
+        
+        tokenized = self.tokenizer(
+            texts,
+            truncation=True,
+            max_length=self.max_length,
+            padding="max_length",
+            return_tensors="pt",
+        )
+        
+        input_ids = tokenized["input_ids"]
+        attention_mask = tokenized["attention_mask"]
+        labels = input_ids.clone()
+        
+        # Shift labels for next token prediction
+        labels[:, :-1] = input_ids[:, 1:]
+        last_token = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else -100
+        labels[:, -1] = last_token
+        
+        # Handle padding in labels
+        labels[attention_mask == 0] = -100
+        padding_start = attention_mask.sum(dim=1) - 1
+        for i in range(len(padding_start)):
+            if padding_start[i] > 0:
+                labels[i, padding_start[i]] = -100
+            
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels,
+        }
+if __name__ == '__main__':
+    # directory = '/home/yueyulin/data/finemath/finemath-4plus/'
+    # dataset_type = detect_format(directory)
+    # print(f"Detected dataset type: {dataset_type}")
+    # dataset = load_functions[dataset_type](directory)
+    # print(dataset)
+    # #find unique value of language
+    # print(dataset.unique('language'))
+    # print(dataset[0]['text'])
+    # print(check_feature(dataset))
+    # dataset = dataset.select_columns(['text'])
+    # print(dataset[0]['text'])
+    # print(dataset)
+    
+    # directory = '/home/yueyulin/data/Mobius/standard/'
+    # dataset_type = detect_format(directory)
+    # print(f"Detected dataset type: {dataset_type}")
+    # dataset = load_functions[dataset_type](directory)
+    # print(dataset)
+    # print(check_feature(dataset))
+    # dataset = convert_conversational_ds_to_text(dataset)
+    # print(dataset)
+    # print(check_feature(dataset))
+    # print(dataset[0]['text'])
     directories = ['/home/yueyulin/data/Magpie-Qwen2.5-Pro-1M-v0.1/data','/home/yueyulin/data/finemath/finemath-4plus/', '/home/yueyulin/data/Mobius/standard/']
     
-    all_ds = load_datasets_from_directories(directories)
+    all_ds,feature_types = load_datasets_from_directories(directories)
     print(all_ds)
-    con_ds = datasets.concatenate_datasets(all_ds)
-    print(con_ds)
-    print(con_ds[0]['text'])
+    for ds,feature_type in zip(all_ds,feature_types):
+        print(f"Feature type: {feature_type}")
+        print(ds)
+        print(ds[0]['text'])
+        print("-------------------")
+    typed_dataset = TypedDataset(all_ds, feature_types)
+    print(typed_dataset)
+    print(typed_dataset[0]['text'])
     model_path = '/home/yueyulin/model/qwen_7b_stage3_4k_splits/'
     from transformers import DataCollatorForLanguageModeling,AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     data_collator = StreamingCLMDataCollator(tokenizer=tokenizer, max_length=4096)
+    data_collator = TypedStreamingCLMDataCollator(tokenizer=tokenizer, 
+                                                  max_length=2048, 
+                                                  min_length=2048, 
+                                                  typed_dataset=typed_dataset)
     import torch
     from torch.utils.data import DataLoader
-    data_loader = DataLoader(con_ds, batch_size=1, collate_fn=data_collator)
+    data_loader = DataLoader(typed_dataset, batch_size=2, collate_fn=data_collator,shuffle=True)
     for batch in data_loader:
         print(batch)
-        print(batch['input_ids'].tolist())
-        print(batch['attention_mask'].tolist())
-        print(batch['labels'].tolist())
-        print(batch['input_ids'].shape)
-        print(batch['attention_mask'].shape)
-        print(batch['labels'].shape)
+        print(tokenizer.decode(batch['input_ids'][0]))
+        print("====================================")
+        print(tokenizer.decode(batch['input_ids'][1]))
         break

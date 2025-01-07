@@ -214,10 +214,10 @@ class HybridModel(nn.Module):
         all_keys = set(self.state_dict().keys())
         incompatible_keys = set()
         #if the path is the file, load it directly
-        #if the path is the directory, load the sharded files in the directory with suffix .pt
+        #if the path is the directory, load the sharded files in the directory with suffix .pt or .bin
         if os.path.isdir(path):
             files = os.listdir(path)
-            files = [os.path.join(path, f) for f in files if f.endswith('.pt')]
+            files = [os.path.join(path, f) for f in files if f.endswith('.pt') or f.endswith('.bin')]
         else:
             files = [path]
         for file in files:

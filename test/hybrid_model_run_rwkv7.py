@@ -169,9 +169,10 @@ class RWKV_Tmix_x070(nn.Module):
             self.key = nn.Linear(C, C, bias=False)
             self.value = nn.Linear(C, C, bias=False)
             self.output = nn.Linear(C, C, bias=False)
-            self.ln_x = nn.GroupNorm(
-                H, C, eps=(1e-5) * (args.head_size_divisor**2)
-            )  # !!! notice eps value !!!
+            if self.args.has_group_norm:
+                self.ln_x = nn.GroupNorm(
+                    H, C, eps=(1e-5) * (args.head_size_divisor**2)
+                )  # !!! notice eps value !!!
 
             # !!! initialize if you are using RWKV_Tmix_x070 in your code !!!
             # self.receptance.weight.data.uniform_(-0.5/(C**0.5), 0.5/(C**0.5))
@@ -232,8 +233,8 @@ class RWKV_Tmix_x070(nn.Module):
             (kk * a).bfloat16(),
             s=wkv_state,
         )
-
-        x = self.ln_x(x.view(B * T, C)).view(B, T, C)
+        if self.args.has_group_norm:
+            x = self.ln_x(x.view(B * T, C)).view(B, T, C)
         x = x + (
             (r.view(B, T, H, -1) * k.view(B, T, H, -1) * self.r_k).sum(
                 dim=-1, keepdim=True

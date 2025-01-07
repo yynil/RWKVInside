@@ -6,6 +6,7 @@ from torch.utils.cpp_extension import load
 HEAD_SIZE = 64
 import sys
 import os
+
 parent_dir = os.path.dirname(os.path.abspath(__file__))
 print(f'parent_dir: {parent_dir}')
 is_wind_cuda = False
@@ -187,7 +188,12 @@ class RWKV_Tmix_x070(torch.nn.Module):
             v_first = v # store the v of the first layer
         else:
             v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2) # add value residual
-
+        # if self.args.local_rank == 3:
+        #     v_first_mean = v_first.mean().item()
+        #     print(f'pid is {os.getpid()} has_norm:{self.has_group_norm} v_first: {v_first_mean} at layer {self.layer_id}')
+        # if self.args.local_rank == 0 and self.layer_id ==1 :
+        #     v_first_mean = v_first.mean().item()
+        #     print(f'MASTER pid is {os.getpid()} has_norm:{self.has_group_norm} v_first: {v_first_mean} at layer {self.layer_id}')
         a = torch.sigmoid(self.a0 + (xa @ self.a1) @ self.a2) # a is "in-context learning rate"
         g = torch.sigmoid(xg @ self.g1) @ self.g2
         kk = k * self.k_k

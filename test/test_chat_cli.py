@@ -18,6 +18,7 @@ if __name__ == '__main__':
     parser.add_argument("--ckpt_file", type=str, default=None)
     parser.add_argument("--is_hybrid", action="store_true", default=False)
     parser.add_argument("--num_gpus", type=int, default=1)
+    parser.add_argument('--has_norm', action='store_true', default=False)
     parser.add_argument("--is_rwkv_6", action="store_true", default=False)
     args = parser.parse_args()
     print(args)
@@ -36,6 +37,7 @@ if __name__ == '__main__':
     transformer_config = AutoConfig.from_pretrained(model_id)
     if args.is_hybrid:
         rwkv_args = create_rwkv_args(transformer_config, config)
+        rwkv_args.has_group_norm = args.has_norm
         model = HybridModel(rwkv_args,transformer_config)
         ckpt_file = args.ckpt_file
         if ckpt_file is None:
@@ -73,10 +75,10 @@ if __name__ == '__main__':
         do_sample = True,
         use_cache = True,
         temperature = 0.7,
-        top_k = 40,
+        top_k = 10,
         top_p = 0.9,
         min_p = 0.05,
-        repetition_penalty = 1.0,
+        repetition_penalty = 1.1,
     )
     message = input('please input message:')
     conversation = [{

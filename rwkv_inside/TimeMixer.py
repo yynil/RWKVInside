@@ -90,6 +90,7 @@ class RWKV_Tmix_x070(torch.nn.Module):
         H = self.n_head
         N = self.head_size
         C = args.n_embd
+        self.gate_free = args.gate_free if hasattr(args, 'gate_free') else False
         self.has_group_norm = args.has_group_norm if hasattr(args, 'has_group_norm') else False
 
         with torch.no_grad():
@@ -144,8 +145,9 @@ class RWKV_Tmix_x070(torch.nn.Module):
             D_GATE_LORA = 128
             # D_GATE_LORA = max(32, int(round(  (0.6*(C**0.8))  /32)*32)) # suggestion
             # Note: for some data, you can reduce D_GATE_LORA or even remove this gate
-            self.g1 = nn.Parameter(torch.ones(C, D_GATE_LORA))
-            self.g2 = nn.Parameter(torch.ones(D_GATE_LORA, C))
+            if not self.gate_free:
+                self.g1 = nn.Parameter(torch.ones(C, D_GATE_LORA))
+                self.g2 = nn.Parameter(torch.ones(D_GATE_LORA, C))
 
             self.k_k = nn.Parameter(torch.ones(1,1,C)*0.85)
             self.k_a = nn.Parameter(torch.ones(1,1,C))
@@ -195,7 +197,8 @@ class RWKV_Tmix_x070(torch.nn.Module):
         #     v_first_mean = v_first.mean().item()
         #     print(f'MASTER pid is {os.getpid()} has_norm:{self.has_group_norm} v_first: {v_first_mean} at layer {self.layer_id}')
         a = torch.sigmoid(self.a0 + (xa @ self.a1) @ self.a2) # a is "in-context learning rate"
-        g = torch.sigmoid(xg @ self.g1) @ self.g2
+        if not self.gate_free:
+            g = torch.sigmoid(xg @ self.g1) @ self.g2
         kk = k * self.k_k
         kk = F.normalize(kk.view(B,T,H,-1), dim=-1, p=2.0).view(B,T,C)
         k = k * (1 + (a-1) * self.k_a)
@@ -205,7 +208,10 @@ class RWKV_Tmix_x070(torch.nn.Module):
         else:
             x = x.view(B, T, C)
         x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
-        x = self.output(x * g)
+        if not self.gate_free:
+            x = self.output(x * g)
+        else:
+            x = self.output(x)
         return x, v_first
     
 

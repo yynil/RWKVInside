@@ -20,6 +20,7 @@ if __name__ == '__main__':
     parser.add_argument("--num_gpus", type=int, default=1)
     parser.add_argument('--has_norm', action='store_true', default=False)
     parser.add_argument("--is_rwkv_6", action="store_true", default=False)
+    parser.add_argument("--gate_free", action="store_true", default=False)
     args = parser.parse_args()
     print(args)
     if args.is_rwkv_6:
@@ -38,6 +39,7 @@ if __name__ == '__main__':
     if args.is_hybrid:
         rwkv_args = create_rwkv_args(transformer_config, config)
         rwkv_args.has_group_norm = args.has_norm
+        rwkv_args.gate_free = args.gate_free
         model = HybridModel(rwkv_args,transformer_config)
         ckpt_file = args.ckpt_file
         if ckpt_file is None:

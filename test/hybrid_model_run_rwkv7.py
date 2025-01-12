@@ -1,6 +1,5 @@
 import sys
 import os
-import types
 import threading
 import gc
 
@@ -157,8 +156,9 @@ class RWKV_Tmix_x070(nn.Module):
             D_GATE_LORA = 128
             # D_GATE_LORA = max(32, int(round(  (0.6*(C**0.8))  /32)*32)) # suggestion
             # Note: for some data, you can reduce D_GATE_LORA or even remove this gate
-            self.g1 = nn.Parameter(torch.zeros(C, D_GATE_LORA))
-            self.g2 = nn.Parameter(ortho_init(torch.zeros(D_GATE_LORA, C), 0.1))
+            if not self.args.gate_free:
+                self.g1 = nn.Parameter(torch.zeros(C, D_GATE_LORA))
+                self.g2 = nn.Parameter(ortho_init(torch.zeros(D_GATE_LORA, C), 0.1))
 
             self.k_k = nn.Parameter(torch.ones(1, 1, C) * 0.85)
             self.k_a = nn.Parameter(torch.ones(1, 1, C))
@@ -214,7 +214,9 @@ class RWKV_Tmix_x070(nn.Module):
         a = torch.sigmoid(
             self.a0 + (xa @ self.a1) @ self.a2
         )  # a is "in-context learning rate"
-        g = torch.sigmoid(xg @ self.g1) @ self.g2
+
+        if not self.args.gate_free:
+            g = torch.sigmoid(xg @ self.g1) @ self.g2
         kk = k * self.k_k
         kk = F.normalize(kk.view(B, T, H, -1), dim=-1, p=2.0).view(B, T, C)
         k = k * (1 + (a - 1) * self.k_a)
@@ -241,7 +243,10 @@ class RWKV_Tmix_x070(nn.Module):
             )
             * v.view(B, T, H, -1)
         ).view(B, T, C)
-        x = self.output(x * g)
+        if not self.args.gate_free:
+            x = self.output(x * g)
+        else:
+            x = self.output(x)
         return x, TimeMixState(lx, wkv_state)
 
 

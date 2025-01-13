@@ -3,3 +3,4 @@ hf_model_weights.pth
 
 *.pyc
 configs/*/*.safetensors*
+.vscode/launch.json

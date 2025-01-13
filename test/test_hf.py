@@ -4,6 +4,8 @@ from transformers.modeling_utils import no_init_weights
 from collections import OrderedDict
 
 import os
+from transformers import TextIteratorStreamer
+import threading
 
 
 with no_init_weights():
@@ -27,4 +29,20 @@ response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
 import os
 os.system('clear')  # Windows 使用 'cls' 清除命令行
 print(response)
+
+os.system('clear')  # Windows 使用 'cls' 清除命令行
+streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+
+# 在单独的线程中生成文本
+generation_kwargs = dict(model_inputs, streamer=streamer, max_new_tokens=512, do_sample=True)
+thread = threading.Thread(target=model.generate, kwargs=generation_kwargs)
+thread.start()
+
+# 逐步输出生成的文本
+print("Streaming output:")
+for new_text in streamer:
+    print(new_text, end="", flush=True)
+
+# 等待生成线程完成
+thread.join()
 

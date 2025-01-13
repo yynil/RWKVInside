@@ -422,7 +422,8 @@ def compute_adaptive_kl_loss(
     teacher_logits: torch.Tensor,
     mu: float = 0.5,
     k_top: int = 512,
-    debug: bool = True
+    debug: bool = True,
+    eps: float = 1e-8
 ) -> torch.Tensor:
     """
     Memory-optimized Adaptive KL Loss using iterative top-k search
@@ -430,57 +431,73 @@ def compute_adaptive_kl_loss(
     global stats
     stats.total_calls += 1
     
-    student_probs = F.softmax(student_logits, dim=-1)
-    teacher_probs = F.softmax(teacher_logits, dim=-1)
+    # 添加数值稳定性的 softmax
+    student_probs = F.softmax(student_logits, dim=-1).clamp(min=eps)
+    teacher_probs = F.softmax(teacher_logits, dim=-1).clamp(min=eps)
     
+    if debug and deepspeed.comm.get_rank() == 0:
+        # 在计算开始时检查输入
+        logging.info(f"\nInput stats:")
+        logging.info(f"student_logits range: [{student_logits.min():.4e}, {student_logits.max():.4e}]")
+        logging.info(f"teacher_logits range: [{teacher_logits.min():.4e}, {teacher_logits.max():.4e}]")
+        logging.info(f"student_probs sum: {student_probs.sum(-1).mean():.4f}")
+        logging.info(f"teacher_probs sum: {teacher_probs.sum(-1).mean():.4f}")
+
     batch_size, seq_len, vocab_size = teacher_probs.shape
     device = teacher_probs.device
 
-    # 使用迭代式top-k查找cutoff点，现在也返回迭代次数
     M, cutoff_points, within_first_topk, iterations = find_cutoff_with_iterative_topk(
         teacher_probs, mu, k_top)
     
-    # 更新统计信息
-    stats.total_iterations += iterations
-    stats.total_cutoff_sum += cutoff_points.float().mean().item() * (batch_size * seq_len)
-    stats.total_samples += (batch_size * seq_len)
-    
-    # 每1000次在rank0上打印统计信息
-    if debug and stats.total_calls % 1000 == 0 and deepspeed.comm.get_rank() == 0:
-        avg_iterations = stats.total_iterations / stats.total_calls
-        avg_cutoff = stats.total_cutoff_sum / stats.total_samples
-        logging.info(f"\n=== AKL Stats (call {stats.total_calls}) ===")
-        logging.info(f"Vocabulary size: {vocab_size}")
-        logging.info(f"Average search iterations: {avg_iterations:.2f}")
-        logging.info(f"Average cutoff position: {avg_cutoff:.2f} / {vocab_size}")
-        logging.info(f"Current batch cutoff mean: {cutoff_points.float().mean():.2f}")
-        logging.info(f"Current batch cutoff min/max: {cutoff_points.min().item()}/{cutoff_points.max().item()}")
-    
-    # 计算gaps
+    # 计算 gaps 并添加诊断信息
     gaps = torch.abs(teacher_probs - student_probs)
     g_head = torch.sum(M * gaps, dim=-1)
     g_tail = torch.sum((1 - M) * gaps, dim=-1)
     
     total_gap = g_head + g_tail
-    w_head = torch.where(total_gap > 0, g_head / total_gap, 0.5 * torch.ones_like(g_head))
+    
+    if debug and deepspeed.comm.get_rank() == 0:
+        logging.info(f"\nGaps stats:")
+        logging.info(f"gaps range: [{gaps.min():.4e}, {gaps.max():.4e}]")
+        logging.info(f"g_head range: [{g_head.min():.4e}, {g_head.max():.4e}]")
+        logging.info(f"g_tail range: [{g_tail.min():.4e}, {g_tail.max():.4e}]")
+        logging.info(f"total_gap range: [{total_gap.min():.4e}, {total_gap.max():.4e}]")
+    
+    # 修改权重计算，增加数值稳定性
+    w_head = torch.where(total_gap > eps, 
+                        g_head / (total_gap + eps), 
+                        0.5 * torch.ones_like(g_head))
+    w_head = w_head.clamp(0.0, 1.0)  # 确保权重在有效范围内
     w_tail = 1 - w_head
     
-    student_log_probs = F.log_softmax(student_logits, dim=-1)
-    teacher_log_probs = F.log_softmax(teacher_logits, dim=-1)
+    # 计算 log_probs 时添加 clamp
+    student_log_probs = torch.log(student_probs.clamp(min=eps))
+    teacher_log_probs = torch.log(teacher_probs.clamp(min=eps))
     
-    fkl = F.kl_div(
+    # 分别计算 KL 散度的组件
+    fkl_components = F.kl_div(
         student_log_probs.flatten(0, 1),
         teacher_probs.flatten(0, 1),
         reduction='none',
         log_target=False
-    ).sum(-1).view(batch_size, -1)
+    )
     
-    rkl = F.kl_div(
+    rkl_components = F.kl_div(
         teacher_log_probs.flatten(0, 1),
         student_probs.flatten(0, 1),
         reduction='none',
         log_target=False
-    ).sum(-1).view(batch_size, -1)
+    )
+    
+    # 在求和之前检查数值
+    if debug and deepspeed.comm.get_rank() == 0:
+        logging.info(f"\nKL components stats:")
+        logging.info(f"fkl_components range: [{fkl_components.min():.4e}, {fkl_components.max():.4e}]")
+        logging.info(f"rkl_components range: [{rkl_components.min():.4e}, {rkl_components.max():.4e}]")
+    
+    # 添加 clamp 来防止极端值
+    fkl = fkl_components.sum(-1).view(batch_size, -1).clamp(max=1e3)
+    rkl = rkl_components.sum(-1).view(batch_size, -1).clamp(max=1e3)
     
     loss = w_head * fkl + w_tail * rkl
     
@@ -490,6 +507,9 @@ def compute_adaptive_kl_loss(
         logging.error(f"cutoff_points stats: mean={cutoff_points.float().mean():.2f}, min={cutoff_points.min().item()}, max={cutoff_points.max().item()}")
         logging.error(f"w_head stats: mean={w_head.mean():.4f}, min={w_head.min():.4f}, max={w_head.max():.4f}")
         logging.error(f"Loss components - fkl: mean={fkl.mean():.4f}, rkl: mean={rkl.mean():.4f}")
+        # 添加新的调试信息
+        logging.error(f"student_probs stats: mean={student_probs.mean():.4e}, min={student_probs.min():.4e}, max={student_probs.max():.4e}")
+        logging.error(f"teacher_probs stats: mean={teacher_probs.mean():.4e}, min={teacher_probs.min():.4e}, max={teacher_probs.max():.4e}")
     
     return loss.mean()
 

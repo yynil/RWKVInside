@@ -291,22 +291,207 @@ def get_teacher_outputs(teacher_model, input_ids, attention_mask, labels, args):
 @time_function
 def compute_kl_loss(student_outputs, teacher_logits, labels, args, chunk_size=4096):
     student_logits = student_outputs.logits  # shape: [batch_size, seq_len, vocab_size]
-    student_cross_entropy_loss = student_outputs.loss
-    
-    # 先对整个序列计算 softmax，保证归一化范围一致
-    log_probs_student = F.log_softmax(student_logits, dim=-1)  # 在词表维度上做 softmax
+    if args.enable_AKL:
+        kl_loss = compute_adaptive_kl_loss(student_logits, teacher_logits)
+    else:
+        
+        # 先对整个序列计算 softmax，保证归一化范围一致
+        log_probs_student = F.log_softmax(student_logits, dim=-1)  # 在词表维度上做 softmax
 
-    targets = F.softmax(teacher_logits, dim=-1)
-    
-    kl_loss = F.kl_div(
-            log_probs_student,
-            targets,
-            reduction='batchmean'
-        )
+        targets = F.softmax(teacher_logits, dim=-1)
+        
+        kl_loss = F.kl_div(
+                log_probs_student,
+                targets,
+                reduction='batchmean'
+            )
+        del log_probs_student, targets
+    student_cross_entropy_loss = student_outputs.loss
     loss = args.kl_weight * kl_loss + args.ce_weight * student_cross_entropy_loss
-    del student_logits, teacher_logits, labels, log_probs_student, targets
+    del student_logits, teacher_logits, labels
     return loss, kl_loss, student_cross_entropy_loss
 
+import torch
+import torch.nn.functional as F
+import logging
+import deepspeed
+from typing import Dict, Any
+
+class Stats:
+    def __init__(self):
+        self.total_calls = 0
+        self.total_iterations = 0  # 总搜索迭代次数
+        self.total_cutoff_sum = 0  # cutoff点位置总和
+        self.total_samples = 0     # 总样本数
+        
+stats = Stats()
+
+@time_function
+def find_cutoff_with_iterative_topk(probs: torch.Tensor, mu: float, k_top: int = 512) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """
+    使用迭代式top-k查找cutoff点
+    """
+    batch_size, seq_len, vocab_size = probs.shape
+    device = probs.device
+    
+    flat_probs = probs.view(-1, vocab_size)
+    flat_batch_size = flat_probs.size(0)
+    
+    # DEBUG: 检查概率分布
+    # if deepspeed.comm.get_rank() == 0 and torch.distributed.get_rank() == 0:
+    #     sample_idx = 0
+    #     top10_probs, _ = torch.topk(flat_probs[sample_idx], 10)
+    #     logging.info(f"\nTop-10 probabilities sample: {top10_probs.cpu().tolist()}")
+    #     logging.info(f"Sum of all probs: {flat_probs[sample_idx].sum():.4f}")
+    #     logging.info(f"Number of probs > 0.01: {(flat_probs[sample_idx] > 0.01).sum().item()}")
+    
+    M = torch.zeros_like(flat_probs)
+    processed_mask = torch.zeros_like(flat_probs, dtype=torch.bool)
+    cumulative_sum = torch.zeros(flat_batch_size, device=device)
+    cutoff_points = torch.zeros(flat_batch_size, dtype=torch.long, device=device)
+    found_cutoff = torch.zeros(flat_batch_size, dtype=torch.bool, device=device)
+    within_first_topk = torch.zeros(flat_batch_size, dtype=torch.bool, device=device)
+    
+    iteration = 0
+    max_iterations = (vocab_size + k_top - 1) // k_top
+    
+    # 记录实际需要累积的token数量
+    tokens_to_mu = torch.zeros(flat_batch_size, device=device)
+    
+    while not found_cutoff.all() and iteration < max_iterations:
+        iteration += 1
+        
+        masked_probs = torch.where(processed_mask, torch.full_like(flat_probs, float('-inf')), flat_probs)
+        curr_topk_probs, curr_topk_indices = torch.topk(masked_probs, min(k_top, vocab_size - k_top * (iteration-1)), dim=-1)
+        
+        processed_mask.scatter_(-1, curr_topk_indices, True)
+        
+        # 对每个样本进行累积概率计算
+        for i in range(flat_batch_size):
+            if found_cutoff[i]:
+                continue
+            
+            # 计算当前chunk中的累积和，直到超过mu
+            curr_cumsum = torch.cumsum(curr_topk_probs[i], dim=-1)
+            needed_sum = mu - cumulative_sum[i]
+            
+            # 找到第一个累积和超过needed_sum的位置
+            positions_over_mu = (curr_cumsum >= needed_sum).nonzero()
+            
+            if len(positions_over_mu) > 0:
+                # 找到了cutoff点
+                k = positions_over_mu[0].item() + 1  # +1是因为我们要包含这个位置
+                cutoff_points[i] = k + k_top * (iteration-1)
+                M[i].scatter_(-1, curr_topk_indices[i, :k], 1.0)
+                found_cutoff[i] = True
+                tokens_to_mu[i] = cutoff_points[i]
+                
+                if iteration == 1:
+                    within_first_topk[i] = True
+            else:
+                # 没找到cutoff点，继续累积
+                cumulative_sum[i] += curr_topk_probs[i].sum()
+                M[i].scatter_(-1, curr_topk_indices[i], 1.0)
+                tokens_to_mu[i] += curr_topk_probs[i].size(0)
+    
+    not_found_mask = ~found_cutoff
+    if not_found_mask.any():
+        cutoff_points[not_found_mask] = vocab_size
+        tokens_to_mu[not_found_mask] = vocab_size
+    
+    # DEBUG: 输出统计信息
+    # if deepspeed.comm.get_rank() == 0:
+    #     avg_tokens_to_mu = tokens_to_mu.float().mean().item()
+    #     max_tokens_to_mu = tokens_to_mu.max().item()
+    #     logging.info(f"Average tokens needed to reach mu: {avg_tokens_to_mu:.2f}")
+    #     logging.info(f"Max tokens needed to reach mu: {max_tokens_to_mu}")
+        
+    #     # 计算有多少样本在第一个chunk内找到了cutoff点
+    #     first_chunk_ratio = (cutoff_points < k_top).float().mean().item()
+    #     logging.info(f"Ratio of samples found in first chunk: {first_chunk_ratio:.2%}")
+    
+    M = M.view(batch_size, seq_len, vocab_size)
+    cutoff_points = cutoff_points.view(batch_size, seq_len)
+    within_first_topk = within_first_topk.view(batch_size, seq_len)
+    
+    return M, cutoff_points, within_first_topk, iteration
+
+@time_function
+def compute_adaptive_kl_loss(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    mu: float = 0.5,
+    k_top: int = 512,
+    debug: bool = True
+) -> torch.Tensor:
+    """
+    Memory-optimized Adaptive KL Loss using iterative top-k search
+    """
+    global stats
+    stats.total_calls += 1
+    
+    student_probs = F.softmax(student_logits, dim=-1)
+    teacher_probs = F.softmax(teacher_logits, dim=-1)
+    
+    batch_size, seq_len, vocab_size = teacher_probs.shape
+    device = teacher_probs.device
+
+    # 使用迭代式top-k查找cutoff点，现在也返回迭代次数
+    M, cutoff_points, within_first_topk, iterations = find_cutoff_with_iterative_topk(
+        teacher_probs, mu, k_top)
+    
+    # 更新统计信息
+    stats.total_iterations += iterations
+    stats.total_cutoff_sum += cutoff_points.float().mean().item() * (batch_size * seq_len)
+    stats.total_samples += (batch_size * seq_len)
+    
+    # 每10次在rank0上打印统计信息
+    if debug and stats.total_calls % 10 == 0 and deepspeed.comm.get_rank() == 0:
+        avg_iterations = stats.total_iterations / stats.total_calls
+        avg_cutoff = stats.total_cutoff_sum / stats.total_samples
+        logging.info(f"\n=== AKL Stats (call {stats.total_calls}) ===")
+        logging.info(f"Vocabulary size: {vocab_size}")
+        logging.info(f"Average search iterations: {avg_iterations:.2f}")
+        logging.info(f"Average cutoff position: {avg_cutoff:.2f} / {vocab_size}")
+        logging.info(f"Current batch cutoff mean: {cutoff_points.float().mean():.2f}")
+        logging.info(f"Current batch cutoff min/max: {cutoff_points.min().item()}/{cutoff_points.max().item()}")
+    
+    # 计算gaps
+    gaps = torch.abs(teacher_probs - student_probs)
+    g_head = torch.sum(M * gaps, dim=-1)
+    g_tail = torch.sum((1 - M) * gaps, dim=-1)
+    
+    total_gap = g_head + g_tail
+    w_head = torch.where(total_gap > 0, g_head / total_gap, 0.5 * torch.ones_like(g_head))
+    w_tail = 1 - w_head
+    
+    student_log_probs = F.log_softmax(student_logits, dim=-1)
+    teacher_log_probs = F.log_softmax(teacher_logits, dim=-1)
+    
+    fkl = F.kl_div(
+        student_log_probs.flatten(0, 1),
+        teacher_probs.flatten(0, 1),
+        reduction='none',
+        log_target=False
+    ).sum(-1).view(batch_size, -1)
+    
+    rkl = F.kl_div(
+        teacher_log_probs.flatten(0, 1),
+        student_probs.flatten(0, 1),
+        reduction='none',
+        log_target=False
+    ).sum(-1).view(batch_size, -1)
+    
+    loss = w_head * fkl + w_tail * rkl
+    
+    if debug and (torch.isnan(loss).any() or torch.isinf(loss).any()):
+        logging.error("\n=== Error in AKL Loss ===")
+        logging.error(f"NaN or Inf detected in loss")
+        logging.error(f"cutoff_points stats: mean={cutoff_points.float().mean():.2f}, min={cutoff_points.min().item()}, max={cutoff_points.max().item()}")
+        logging.error(f"w_head stats: mean={w_head.mean():.4f}, min={w_head.min():.4f}, max={w_head.max():.4f}")
+        logging.error(f"Loss components - fkl: mean={fkl.mean():.4f}, rkl: mean={rkl.mean():.4f}")
+    
+    return loss.mean()
 
 def configure_optimizer(model, args):
     lr_decay = set()

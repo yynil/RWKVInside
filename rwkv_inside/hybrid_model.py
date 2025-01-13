@@ -1,9 +1,5 @@
 import sys
 import os
-'''
-For test purpose only , we need to comment it  out
-'''
-
 def setup_env():
     parent_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     sys.path.append(parent_dir)
@@ -35,8 +31,6 @@ def setup_env():
     
 setup_env()
 
-from functools import partial
-import os
 from typing import Optional, Tuple
 RWKV_VERSION=os.environ.get('RWKV_VERSION','v7')
 is_rwkv_7 = RWKV_VERSION == 'v7'
@@ -45,21 +39,12 @@ if is_rwkv_7 :
 else:
     from TimeMixer import RWKV_Tmix_x060 as TimeMixer
 import torch
-import pytorch_lightning as pl
 import torch.nn as nn
-from torch.nn import functional as F
 
-
-import deepspeed
-from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
-from deepspeed.accelerator import get_accelerator
-from pytorch_lightning.strategies import DeepSpeedStrategy
-# from adam_mini import Adam_mini
 from transformers import AutoModelForCausalLM
 import gc
 import logging
-# from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss
-import os
+import deepspeed
 logging.basicConfig(
     level=os.environ.get("LOGLEVEL", "INFO"),
     format='%(asctime)s | %(levelname)s | %(message)s',
@@ -163,10 +148,6 @@ class HybridModel(nn.Module):
     
     def __init__(self, transformer_model, rwkv_args, tokenizer=None):
         super(HybridModel, self).__init__()
-        attn_num_heads = transformer_model.config.num_attention_heads
-        attn_num_key_value_heads = transformer_model.config.num_key_value_heads
-        assert attn_num_heads % attn_num_key_value_heads == 0
-        n_share = attn_num_heads // attn_num_key_value_heads
         stage = rwkv_args.stage
         if stage == 1:
             #Freeze the model
@@ -187,7 +168,6 @@ class HybridModel(nn.Module):
                 llama_layer = transformer_model.model.layers[layer_idx]
                 attn_wrapper = AttentionWrapper(student_attn,layer_idx,rwkv_args)
                 llama_layer.self_attn = attn_wrapper
-                import gc
                 gc.collect()
         self.model = transformer_model
         self.add_module("model", self.model)
@@ -243,7 +223,6 @@ class HybridModel(nn.Module):
 
 if __name__ == '__main__':
     model_id = '/home/yueyulin/models/Qwen2.5-0.5B-Instruct/'
-    from transformers import AutoConfig,AutoModelForCausalLM
     from transformers.modeling_utils import no_init_weights
     config = AutoConfig.from_pretrained(model_id)
     rwkv_args = HybridModel.get_rwkv_args(config)

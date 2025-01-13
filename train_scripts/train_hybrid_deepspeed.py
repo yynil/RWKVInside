@@ -338,6 +338,7 @@ if __name__ == '__main__':
     args.betas = (args.beta1, args.beta2)
     args.kl_weight = config['kl_weight']
     args.ce_weight = config['ce_weight']
+    args.enable_AKL = config.get('enable_AKL', False)
     args.model_file = config['model_file']
     args.real_bsz = args.train_batch_size
     args.is_sft = config.get('is_sft', False)

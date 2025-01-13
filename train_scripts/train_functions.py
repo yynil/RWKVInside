@@ -445,8 +445,8 @@ def compute_adaptive_kl_loss(
     stats.total_cutoff_sum += cutoff_points.float().mean().item() * (batch_size * seq_len)
     stats.total_samples += (batch_size * seq_len)
     
-    # 每10次在rank0上打印统计信息
-    if debug and stats.total_calls % 10 == 0 and deepspeed.comm.get_rank() == 0:
+    # 每1000次在rank0上打印统计信息
+    if debug and stats.total_calls % 1000 == 0 and deepspeed.comm.get_rank() == 0:
         avg_iterations = stats.total_iterations / stats.total_calls
         avg_cutoff = stats.total_cutoff_sum / stats.total_samples
         logging.info(f"\n=== AKL Stats (call {stats.total_calls}) ===")

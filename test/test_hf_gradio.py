@@ -34,7 +34,7 @@ def stream_chat(prompt, history):
     generation_kwargs = dict(
         model_inputs,
         streamer=streamer,
-        max_new_tokens=512,
+        max_new_tokens=4096,
         do_sample=True,
     )
     thread = threading.Thread(target=model.generate, kwargs=generation_kwargs)
@@ -48,7 +48,7 @@ def stream_chat(prompt, history):
 
 # 创建 Gradio 聊天界面
 with gr.Blocks() as demo:
-    chatbot = gr.Chatbot(label="Chat with LLM")
+    chatbot = gr.Chatbot(label="Chat with LLM", height=750)
     msg = gr.Textbox(label="Your Message")
     clear = gr.Button("Clear Chat")
 

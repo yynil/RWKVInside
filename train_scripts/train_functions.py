@@ -317,12 +317,13 @@ import logging
 import deepspeed
 from typing import Dict, Any
 
-class Stats:
-    def __init__(self):
-        self.total_calls = 0
-        self.total_iterations = 0  # 总搜索迭代次数
-        self.total_cutoff_sum = 0  # cutoff点位置总和
-        self.total_samples = 0     # 总样本数
+def __init__(self):
+    self.total_calls = 0
+    self.total_iterations = 0  # 总搜索迭代次数
+    self.total_cutoff_sum = 0  # cutoff点位置总和
+    self.total_samples = 0     # 总样本数
+    self.cutoff_positions = []  # 存储每次找到的 cutoff 位置
+    self.iteration_counts = []  # 存储每次迭代次数
         
 stats = Stats()
 
@@ -429,7 +430,6 @@ def compute_adaptive_kl_loss(
     Memory-optimized Adaptive KL Loss using iterative top-k search
     """
     global stats
-    stats.total_calls += 1
     
     # 添加数值稳定性的 softmax
     student_probs = F.softmax(student_logits, dim=-1).clamp(min=eps)
@@ -448,7 +448,10 @@ def compute_adaptive_kl_loss(
 
     M, cutoff_points, within_first_topk, iterations = find_cutoff_with_iterative_topk(
         teacher_probs, mu, k_top)
-    
+    # 更新统计信息
+    stats.cutoff_positions.append(cutoff_points.mean().item())
+    stats.iteration_counts.append(iterations)
+    stats.total_calls += 1
     # 计算 gaps 并添加诊断信息
     gaps = torch.abs(teacher_probs - student_probs)
     g_head = torch.sum(M * gaps, dim=-1)
@@ -456,12 +459,12 @@ def compute_adaptive_kl_loss(
     
     total_gap = g_head + g_tail
     
-    if debug and deepspeed.comm.get_rank() == 0:
-        logging.info(f"\nGaps stats:")
-        logging.info(f"gaps range: [{gaps.min():.4e}, {gaps.max():.4e}]")
-        logging.info(f"g_head range: [{g_head.min():.4e}, {g_head.max():.4e}]")
-        logging.info(f"g_tail range: [{g_tail.min():.4e}, {g_tail.max():.4e}]")
-        logging.info(f"total_gap range: [{total_gap.min():.4e}, {total_gap.max():.4e}]")
+    # if debug and deepspeed.comm.get_rank() == 0:
+    #     logging.info(f"\nGaps stats:")
+    #     logging.info(f"gaps range: [{gaps.min():.4e}, {gaps.max():.4e}]")
+    #     logging.info(f"g_head range: [{g_head.min():.4e}, {g_head.max():.4e}]")
+    #     logging.info(f"g_tail range: [{g_tail.min():.4e}, {g_tail.max():.4e}]")
+    #     logging.info(f"total_gap range: [{total_gap.min():.4e}, {total_gap.max():.4e}]")
     
     # 修改权重计算，增加数值稳定性
     w_head = torch.where(total_gap > eps, 
@@ -490,10 +493,10 @@ def compute_adaptive_kl_loss(
     )
     
     # 在求和之前检查数值
-    if debug and deepspeed.comm.get_rank() == 0:
-        logging.info(f"\nKL components stats:")
-        logging.info(f"fkl_components range: [{fkl_components.min():.4e}, {fkl_components.max():.4e}]")
-        logging.info(f"rkl_components range: [{rkl_components.min():.4e}, {rkl_components.max():.4e}]")
+    # if debug and deepspeed.comm.get_rank() == 0:
+    #     logging.info(f"\nKL components stats:")
+    #     logging.info(f"fkl_components range: [{fkl_components.min():.4e}, {fkl_components.max():.4e}]")
+    #     logging.info(f"rkl_components range: [{rkl_components.min():.4e}, {rkl_components.max():.4e}]")
     
     # 添加 clamp 来防止极端值
     fkl = fkl_components.sum(-1).view(batch_size, -1).clamp(max=1e3)
@@ -510,7 +513,21 @@ def compute_adaptive_kl_loss(
         # 添加新的调试信息
         logging.error(f"student_probs stats: mean={student_probs.mean():.4e}, min={student_probs.min():.4e}, max={student_probs.max():.4e}")
         logging.error(f"teacher_probs stats: mean={teacher_probs.mean():.4e}, min={teacher_probs.min():.4e}, max={teacher_probs.max():.4e}")
+        # change nan to 10
+        loss[torch.isnan(loss)] = 10
+        loss[torch.isinf(loss)] = 10
     
+    if stats.total_calls % 100 == 0 and deepspeed.comm.get_rank() == 0:
+        avg_cutoff = sum(stats.cutoff_positions) / len(stats.cutoff_positions)
+        avg_iterations = sum(stats.iteration_counts) / len(stats.iteration_counts)
+        vocab_size = teacher_probs.shape[-1]  # 假设 vocab_size 是最后一个维度的大小
+        logging.info(f"After {stats.total_calls} calls: Avg cutoff position = {avg_cutoff}, Avg iterations = {avg_iterations}, Current vocab_size = {vocab_size}")
+        stats.cutoff_positions.clear()
+        stats.iteration_counts.clear()
+        #log the head gap and tail gap to evaluate if the head and tail are well balanced trained
+        logging.info(f"Mean Head gap: {g_head.mean():.4f}")
+        logging.info(f"Mean Tail gap: {g_tail.mean():.4f}")
+
     return loss.mean()
 
 def configure_optimizer(model, args):

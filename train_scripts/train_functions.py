@@ -316,14 +316,14 @@ import torch.nn.functional as F
 import logging
 import deepspeed
 from typing import Dict, Any
-
-def __init__(self):
-    self.total_calls = 0
-    self.total_iterations = 0  # 总搜索迭代次数
-    self.total_cutoff_sum = 0  # cutoff点位置总和
-    self.total_samples = 0     # 总样本数
-    self.cutoff_positions = []  # 存储每次找到的 cutoff 位置
-    self.iteration_counts = []  # 存储每次迭代次数
+class Stats:
+    def __init__(self):
+        self.total_calls = 0
+        self.total_iterations = 0  # 总搜索迭代次数
+        self.total_cutoff_sum = 0  # cutoff点位置总和
+        self.total_samples = 0     # 总样本数
+        self.cutoff_positions = []  # 存储每次找到的 cutoff 位置
+        self.iteration_counts = []  # 存储每次迭代次数
         
 stats = Stats()
 

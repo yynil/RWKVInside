@@ -435,13 +435,13 @@ def compute_adaptive_kl_loss(
     student_probs = F.softmax(student_logits, dim=-1).clamp(min=eps)
     teacher_probs = F.softmax(teacher_logits, dim=-1).clamp(min=eps)
     
-    if debug and deepspeed.comm.get_rank() == 0:
-        # 在计算开始时检查输入
-        logging.info(f"\nInput stats:")
-        logging.info(f"student_logits range: [{student_logits.min():.4e}, {student_logits.max():.4e}]")
-        logging.info(f"teacher_logits range: [{teacher_logits.min():.4e}, {teacher_logits.max():.4e}]")
-        logging.info(f"student_probs sum: {student_probs.sum(-1).mean():.4f}")
-        logging.info(f"teacher_probs sum: {teacher_probs.sum(-1).mean():.4f}")
+    # if debug and deepspeed.comm.get_rank() == 0:
+    #     # 在计算开始时检查输入
+    #     logging.info(f"\nInput stats:")
+    #     logging.info(f"student_logits range: [{student_logits.min():.4e}, {student_logits.max():.4e}]")
+    #     logging.info(f"teacher_logits range: [{teacher_logits.min():.4e}, {teacher_logits.max():.4e}]")
+    #     logging.info(f"student_probs sum: {student_probs.sum(-1).mean():.4f}")
+    #     logging.info(f"teacher_probs sum: {teacher_probs.sum(-1).mean():.4f}")
 
     batch_size, seq_len, vocab_size = teacher_probs.shape
     device = teacher_probs.device
@@ -449,7 +449,7 @@ def compute_adaptive_kl_loss(
     M, cutoff_points, within_first_topk, iterations = find_cutoff_with_iterative_topk(
         teacher_probs, mu, k_top)
     # 更新统计信息
-    stats.cutoff_positions.append(cutoff_points.mean().item())
+    stats.cutoff_positions.append(cutoff_points.float().mean().item())
     stats.iteration_counts.append(iterations)
     stats.total_calls += 1
     # 计算 gaps 并添加诊断信息

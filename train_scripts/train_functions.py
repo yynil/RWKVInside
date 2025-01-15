@@ -519,7 +519,7 @@ def compute_adaptive_kl_loss(
     
     if stats.total_calls % 100 == 0 and deepspeed.comm.get_rank() == 0:
         avg_cutoff = sum(stats.cutoff_positions) / len(stats.cutoff_positions)
-        avg_iterations = sum(stats.iteration_counts) / len(stats.iteration_counts)
+        avg_iterations = float(sum(stats.iteration_counts)) / len(stats.iteration_counts)
         vocab_size = teacher_probs.shape[-1]  # 假设 vocab_size 是最后一个维度的大小
         logging.info(f"After {stats.total_calls} calls: Avg cutoff position = {avg_cutoff}, Avg iterations = {avg_iterations}, Current vocab_size = {vocab_size}")
         stats.cutoff_positions.clear()

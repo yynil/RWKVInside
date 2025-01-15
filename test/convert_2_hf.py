@@ -72,7 +72,8 @@ if __name__ == '__main__':
     from collections import OrderedDict
 
     with no_init_weights():
-        model = AutoModelForCausalLM.from_config(args.output_config_dir, dtype=torch.bfloat16)
+        config = AutoConfig.from_pretrained(args.output_config_dir)
+        model = AutoModelForCausalLM.from_config(config=config).bfloat16()
     print(model)
     
     state_dict = torch.load("hf_model_weights.pth", map_location="cpu", weights_only=True)  # 确保加载到 CPU

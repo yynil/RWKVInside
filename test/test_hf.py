@@ -6,11 +6,12 @@ from collections import OrderedDict
 import os
 from transformers import TextIteratorStreamer
 import threading
-
+import sys
+model_path = sys.argv[1]
 
 with no_init_weights():
-    model = AutoModelForCausalLM.from_pretrained("configs/ARWKV-7B", device_map="auto").bfloat16()
-tokenizer = AutoTokenizer.from_pretrained("configs/ARWKV-7B")
+    model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto").bfloat16()
+tokenizer = AutoTokenizer.from_pretrained(model_path)
 device = "cuda"
 prompt = "Give me a short introduction to large language model."
 

@@ -284,7 +284,7 @@ class RWKV_Tmix_x070_Wrapper(nn.Module):
             keys = T
             values = last_state
             past_key_value.update(keys, values, self.layer_idx)
-        return x, None, past_key_value
+        return x, None
 
 
 class HybridModel(nn.Module):

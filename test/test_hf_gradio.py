@@ -1,13 +1,17 @@
 import gradio as gr
+import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import TextIteratorStreamer
 import threading
 import sys
 model_path = sys.argv[1]
+device = "cuda:2"
 # 加载模型和分词器
-model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto").bfloat16()
+with torch.no_grad():
+    model = AutoModelForCausalLM.from_pretrained(model_path).to(dtype=torch.float16)
+    model = model.to(device)
+    model.eval()
 tokenizer = AutoTokenizer.from_pretrained(model_path)
-device = "cuda"
 
 # 将 Gradio 的 history 格式转换为 apply_chat_template 所需的格式
 def convert_history_to_messages(history):

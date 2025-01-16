@@ -93,21 +93,45 @@ def plot_full_distribution(teacher_probs, student_probs, save_path, top_k=None):
     plt.title('Probability Distribution Comparison (Log Scale)')
     plt.xlabel('Token Index (Sorted by Probability)')
     plt.ylabel('Probability (log scale)')
+    
     plt.legend()
     plt.grid(True)
     
     plt.tight_layout()
     plt.savefig(save_path)
     plt.close()
+    
+def convert_conversation_to_text(conversation):
+    """convert conversations to chatml
+    {"deita_score":10.7623962717,"rw_score":4.3125,"id":"generate_from_topic_and_persona","instruction":"","lang":"zh","length":17,"conversations":[{"from":"human","value":"您能介绍一下航空航天在环境保护方面的具体应用吗？"},{"from":"gpt","value":"航空航天在环境保护方面有许多具体应用。首先，航空航天技术可以用于监测和预测气候变化。卫星观测和大气探测仪器可以收集大量的气象数据，帮助科学家更好地理解气候变化的模式和趋势。其次，航空航天技术可以用于监测和管理地球上的自然资源。卫星遥感和空中激光雷达可以提供关于森林覆盖、水资源、土地利用等方面的详细信息，从而帮助决策者更好地保护和管理这些资源。此外，航空航天技术还可以用于环境灾害的预警和应急响应。卫星图像和空中监测系统可以实时监测火灾、洪水、地震等灾害，提供及时的信息支持和救援指导。总之，航空航天在环境保护方面的具体应用可以为我们提供更多的数据和工具，帮助我们更好地了解和保护我们的地球。"}]}
+    <|im_start|>user\n您能介绍一下航空航天在环境保护方面的具体应用吗？<|im_end|><|im_start|>assistant\n航空航天在环境保护方面有许多具体应用。首先，航空航天技术可以用于监测和预测气候变化。卫星观测和大气探测仪器可以收集大量的气象数据，帮助科学家更好地理解气候变化的模式和趋势。其次，航空航天技术可以用于监测和管理地球上的自然资源。卫星遥感和空中激光雷达可以提供关于森林覆盖、水资源、土地利用等方面的详细信息，从而帮助决策者更好地保护和管理这些资源。此外，航空航天技术还可以用于环境灾害的预警和应急响应。卫星图像和空中监测系统可以实时监测火灾、洪水、地震等灾害，提供及时的信息支持和救援指导。总之，航空航天在环境保护方面的具体应用可以为我们提供更多的数据和工具，帮助我们更好地了解和保护我们的地球。\n<|im_end|>
+
+    Args:
+        conversation (_type_): _description_
+    """
+    text = ""
+    for conv in conversation:
+        if conv['from'] == 'human':
+            text += f"<|im_start|>user\n{conv['value']}<|im_end|>"
+        elif conv['from'] == 'gpt':
+            text += f"<|im_start|>assistant\n{conv['value']}<|im_end|>"
+    return text
 
 def evaluate_models(teacher_model, student_model, tokenizer, test_samples):
     results = []
     
     for sample in tqdm(test_samples):
-        text = sample['text'].strip()
-        if len(text) == 0:
-            print(f"Skipping empty text sample.:{sample}")
-            continue
+        if 'text' in sample:
+            text = sample['text'].strip()
+            if len(text) == 0:
+                print(f"Skipping empty text sample.:{sample}")
+                continue
+        elif 'conversations' in sample:
+            conversations = sample['conversations']
+            """
+            {"deita_score":10.7623962717,"rw_score":4.3125,"id":"generate_from_topic_and_persona","instruction":"","lang":"zh","length":17,"conversations":[{"from":"human","value":"您能介绍一下航空航天在环境保护方面的具体应用吗？"},{"from":"gpt","value":"航空航天在环境保护方面有许多具体应用。首先，航空航天技术可以用于监测和预测气候变化。卫星观测和大气探测仪器可以收集大量的气象数据，帮助科学家更好地理解气候变化的模式和趋势。其次，航空航天技术可以用于监测和管理地球上的自然资源。卫星遥感和空中激光雷达可以提供关于森林覆盖、水资源、土地利用等方面的详细信息，从而帮助决策者更好地保护和管理这些资源。此外，航空航天技术还可以用于环境灾害的预警和应急响应。卫星图像和空中监测系统可以实时监测火灾、洪水、地震等灾害，提供及时的信息支持和救援指导。总之，航空航天在环境保护方面的具体应用可以为我们提供更多的数据和工具，帮助我们更好地了解和保护我们的地球。"}]}
+            """
+            text = convert_conversation_to_text(conversations)
         teacher_probs = get_model_distribution(teacher_model, tokenizer, text,device=teacher_device)
         student_probs = get_model_distribution(student_model, tokenizer, text,device=student_device)
         
@@ -143,8 +167,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     tokenizer = AutoTokenizer.from_pretrained(args.teacher_model)
     with torch.no_grad():
-        teacher_model = AutoModelForCausalLM.from_pretrained(args.teacher_model).bfloat16()
-        student_model = AutoModelForCausalLM.from_pretrained(args.student_model).bfloat16()
+        teacher_model = AutoModelForCausalLM.from_pretrained(args.teacher_model).half()
+        student_model = AutoModelForCausalLM.from_pretrained(args.student_model).half()
         teacher_model.to(teacher_device)
         student_model.to(student_device)
         

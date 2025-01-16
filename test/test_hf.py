@@ -9,10 +9,11 @@ import threading
 import sys
 model_path = sys.argv[1]
 
+device = "cuda:2"
 with no_init_weights():
-    model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto").bfloat16()
+    model = AutoModelForCausalLM.from_pretrained(model_path,device_map="cpu").half()
+    model = model.to(device)
 tokenizer = AutoTokenizer.from_pretrained(model_path)
-device = "cuda"
 prompt = "Give me a short introduction to large language model."
 
 messages = [{"role": "user", "content": prompt}]

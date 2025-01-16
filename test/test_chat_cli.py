@@ -36,6 +36,7 @@ if __name__ == '__main__':
     model_id = config['Llama']['model_id']
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     transformer_config = AutoConfig.from_pretrained(model_id)
+    device = 'cuda:2'
     if args.is_hybrid:
         rwkv_args = create_rwkv_args(transformer_config, config)
         rwkv_args.has_group_norm = args.has_norm
@@ -47,7 +48,7 @@ if __name__ == '__main__':
             model.load_checkpoint(model_id)
         else:
             model.load_checkpoint(ckpt_file)
-        dtype = torch.bfloat16
+        dtype = torch.float16
         model = model.to(dtype=dtype)
         num_gpus = args.num_gpus
         if num_gpus > 1:
@@ -63,11 +64,11 @@ if __name__ == '__main__':
             from accelerate import dispatch_model
             model.model = dispatch_model(model.model, device_map=device_map,offload_buffers=True)
         else:
-            model = model.to(f'cuda:0')
+            model = model.to(device)
     else:
         model = AutoModelForCausalLM.from_pretrained(model_id)
-        model = model.to(torch.bfloat16)
-        model = model.to('cuda:0')
+        model = model.to(torch.float16)
+        model = model.to(device)
     print(model)
     input('press any key to continue')
     from transformers import GenerationConfig
@@ -92,7 +93,7 @@ if __name__ == '__main__':
     while True:
         current_input_text = creat_chatml(conversation)
         print(current_input_text)
-        input_ids = tokenizer(current_input_text, return_tensors="pt").to("cuda:0")
+        input_ids = tokenizer(current_input_text, return_tensors="pt").to(device)
         print(input_ids)
         input_length = input_ids.input_ids.shape[1]
         print(f'input length: {input_length}')
@@ -103,14 +104,16 @@ if __name__ == '__main__':
             else:
                 model_to_use = model
             print(model_to_use)
-            output = model_to_use.generate(
-                    input_ids=input_ids['input_ids'],
-                    attention_mask=input_ids['attention_mask'],
-                    past_key_values=cache,
-                    generation_config=gen_config,
-                    tokenizer = tokenizer,
-                    use_cache = True,
-                )
+            with torch.amp.autocast(device_type='cuda'):
+                output = model_to_use.generate(
+                        input_ids=input_ids['input_ids'],
+                        attention_mask=input_ids['attention_mask'],
+                        past_key_values=cache,
+                        generation_config=gen_config,
+                        tokenizer = tokenizer,
+                        use_cache = True,
+                        output_attentions=False
+                    )
         print(f'generated {output.shape[1] - input_length} tokens')
         generated_text = tokenizer.decode(output[0,input_length:], skip_special_tokens=True)            
         print(generated_text)

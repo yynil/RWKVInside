@@ -291,6 +291,11 @@ def get_teacher_outputs(teacher_model, input_ids, attention_mask, labels, args):
 @time_function
 def compute_kl_loss(student_outputs, teacher_logits, labels, args, chunk_size=4096):
     student_logits = student_outputs.logits  # shape: [batch_size, seq_len, vocab_size]
+    vocab_student = student_logits.shape[-1]
+    vocab_teacher = teacher_logits.shape[-1]
+    #usually vocab_student = vocab_teacher if vocab_teacher is larger than vocab_student, we need to truncate teacher logits since we assume the truncated part is not used
+    if vocab_teacher > vocab_student:
+        teacher_logits = teacher_logits[:, :, :vocab_student]
     if args.enable_AKL:
         kl_loss = compute_adaptive_kl_loss(student_logits, teacher_logits)
     else:

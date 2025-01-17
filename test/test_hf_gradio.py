@@ -22,6 +22,13 @@ def convert_history_to_messages(history):
             messages.append({"role": "assistant", "content": bot_msg})
     return messages
 
+def convert_messages_to_chatml(messages):
+    text = ""
+    for conv in messages:
+        text += f"<|im_start|>{conv['role']}\n{conv['content']}<|im_end|>"
+    text += "<|im_start|>assistant\n"
+    return text
+
 # 流式生成函数
 def stream_chat(prompt, history):
     # 将历史对话转换为 apply_chat_template 所需的格式
@@ -29,7 +36,10 @@ def stream_chat(prompt, history):
     messages.append({"role": "user", "content": prompt})
     
     # 将输入转换为模型输入格式
-    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    # text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    text = convert_messages_to_chatml(messages)
+    print(text)
+    print('----------------')
     model_inputs = tokenizer([text], return_tensors="pt").to(device)
     
     # 创建流式输出器

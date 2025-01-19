@@ -248,8 +248,9 @@ else:
     from torch.utils.cpp_extension import load
     HEAD_SIZE = int(os.environ.get("RWKV_HEAD_SIZE_A", 64))
     cuda_dir = os.path.join(parent_dir, 'cuda')
+    ctx_len = int(os.environ.get('RWKV_CTXLEN','4096'))
     wkv6_cuda = load(name="wkv6", sources=[f"{cuda_dir}/wkv6_op.cpp", f"{cuda_dir}/wkv6_cuda.cu"],
-                    verbose=True, extra_cuda_cflags=["-res-usage", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization", f"-D_N_={HEAD_SIZE}", f"-D_T_={int(os.environ.get('RWKV_CTXLEN',"4096"))}"])
+                    verbose=True, extra_cuda_cflags=["-res-usage", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization", f"-D_N_={HEAD_SIZE}", f"-D_T_={ctx_len}"])
         
     class WKV_6(torch.autograd.Function):
         @staticmethod

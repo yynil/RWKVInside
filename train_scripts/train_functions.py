@@ -216,7 +216,9 @@ def dpo_train_step(model, ref_model, batch, args):
 
 @time_function
 def train_step(model, batch, args, teacher_engine=None, tokenizer=None):
+    # print(batch)
     input_ids = batch['input_ids']
+    attention_mask = batch['attention_mask'].to(torch.int32)
     if 'labels' in batch:
         labels = batch['labels']
         # 验证labels的维度
@@ -230,7 +232,7 @@ def train_step(model, batch, args, teacher_engine=None, tokenizer=None):
                                    device=input_ids.device)], dim=1)
         
 
-    attention_mask = torch.ne(input_ids, tokenizer.pad_token_id).to(input_ids.device)
+    # attention_mask = torch.ne(input_ids, tokenizer.pad_token_id).to(input_ids.device)
 
     # 4. 根据不同模式处理
     if args.is_sft:
@@ -266,6 +268,7 @@ def get_attn_loss(input_ids, student_outputs):
 
 @time_function
 def get_student_outputs(model, args, input_ids, labels, attention_mask):
+    # print(f'student :attention_mask {attention_mask}')
     student_outputs = model(
             input_ids=input_ids,
             attention_mask=attention_mask, 

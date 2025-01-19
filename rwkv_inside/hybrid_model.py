@@ -1,36 +1,5 @@
 import sys
 import os
-def setup_env():
-    parent_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-    sys.path.append(parent_dir)
-    # rwkv_path = os.path.join(parent_dir, 'rwkv7')
-    # sys.path.append(rwkv_path)
-    rwkv6_path = os.path.join(parent_dir, 'rwkv')
-    sys.path.append(rwkv6_path)
-    rwkv_llama_path = os.path.join(parent_dir, 'rwkv_llama')
-    sys.path.append(rwkv_llama_path)
-    # print(f'add path: {rwkv_path} to sys.path')
-    print(f'add path: {parent_dir} to sys.path')
-    print(f'add path: {rwkv_llama_path} to sys.path')
-    os.environ['RWKV_JIT_ON'] = '0'
-    os.environ['RWKV_T_MAX'] = os.environ.get('RWKV_T_MAX', '4096')
-    os.environ['RWKV_FLOAT_MODE'] = 'bf16'
-    os.environ['RWKV_HEAD_SIZE_A'] = '64'
-    
-    os.environ['RWKV_CTXLEN'] = os.environ.get('RWKV_CTXLEN', '4096')
-    if 'WKV' not in os.environ:
-        os.environ['WKV'] = ''
-    if "RWKV_TRAIN_TYPE" not in os.environ:
-        os.environ["RWKV_TRAIN_TYPE"] = ''
-    RWKV_VERSION = os.environ.get('RWKV_VERSION', 'v7')
-    if RWKV_VERSION == 'v7':
-        os.environ["RWKV_MY_TESTING"]='x070'
-    else:
-        os.environ["RWKV_MY_TESTING"]='x060'
-    print(f'RWKV_VERSION is {RWKV_VERSION}')
-    
-setup_env()
-
 from typing import Optional, Tuple
 RWKV_VERSION=os.environ.get('RWKV_VERSION','v7')
 is_rwkv_7 = RWKV_VERSION == 'v7'
@@ -77,6 +46,7 @@ class AttentionWrapper(nn.Module):
         self.add_module("student_attn", self.student_attn)
         self.v_first_state = None#v6 will benefit from v_first_state
         self.global_rank = None
+        self.attention_mask = None
     
     def forward(self, 
         # hidden_states: torch.Tensor,
@@ -94,22 +64,23 @@ class AttentionWrapper(nn.Module):
 
         # NOTE - instead of returning attentions here we return a special attention loss
         hidden_states = kwargs['hidden_states']
-        past_key_value = kwargs.get("past_key_value", None)
         hidden_states = hidden_states.requires_grad_(True)
         v_first = self.v_first_state.shared_state.data[self.global_rank].clone()
+        # print(f"AttentionWrapper: layer_idx={self.layer_idx}, attention_mask={self.attention_mask}")
+        # print(f"kargs={kwargs}")
         if self.args.grad_cp == 1:
             if is_rwkv_7:
-                student_hidden_states,v_first = deepspeed.checkpointing.checkpoint(self.student_attn, hidden_states, v_first)
+                student_hidden_states,v_first = deepspeed.checkpointing.checkpoint(self.student_attn, hidden_states, v_first, self.attention_mask)
             else:
                 student_hidden_states = deepspeed.checkpointing.checkpoint(self.student_attn, hidden_states)
         else:
             if is_rwkv_7:
-                student_hidden_states,v_first = self.student_attn(hidden_states, v_first)
+                student_hidden_states,v_first = self.student_attn(hidden_states, v_first, self.attention_mask)
             else:
                 student_hidden_states = self.student_attn(hidden_states)
         self.v_first_state.shared_state.data[self.global_rank].copy_(v_first)
         if self.args.stage != 1:
-            return (student_hidden_states, None, past_key_value)
+            return (student_hidden_states, None)
         # student_outputs = self.student_attn(hidden_states)
         with torch.no_grad():
             teacher_outputs = self.teacher_attn(*args, **kwargs)
@@ -185,8 +156,14 @@ class HybridModel(nn.Module):
     def forward(
         self,
         input_ids,
+        attention_mask,
         **kwargs,
     ):
+        for layer_idx in range(self.model.config.num_hidden_layers):
+            if layer_idx in self.args.layers:
+                llama_layer = self.model.model.layers[layer_idx]
+                attn_wrapper = llama_layer.self_attn
+                attn_wrapper.attention_mask = attention_mask
         ret = self.model(input_ids, **kwargs)
         return ret
     
@@ -221,16 +198,4 @@ class HybridModel(nn.Module):
         return
 
 
-if __name__ == '__main__':
-    model_id = '/home/yueyulin/models/Qwen2.5-0.5B-Instruct/'
-    from transformers.modeling_utils import no_init_weights
-    config = AutoConfig.from_pretrained(model_id)
-    rwkv_args = HybridModel.get_rwkv_args(config)
-    rwkv_args.has_group_norm = True
-    with no_init_weights():
-        transformer_model = AutoModelForCausalLM.from_config(config)
-    hybrid_model = HybridModel(transformer_model, rwkv_args)    
-    print(hybrid_model)
-    ckpt_path = '/home/yueyulin/model/qwen_0.5b_full_layers_stage2_v7_finemath/pytorch_model.bin'
-    hybrid_model.load_check_point(ckpt_path)
 

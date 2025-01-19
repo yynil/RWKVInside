@@ -4,7 +4,7 @@ def setup_env():
     parent_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     rwkv_insidea_path = os.path.join(parent_dir, 'rwkv_inside')
     sys.path.append(rwkv_insidea_path)
-    # print(f'add path: {rwkv_path} to sys.path')
+    sys.path.append(parent_dir)
     print(f'add path: {rwkv_insidea_path} to sys.path')
     os.environ['RWKV_JIT_ON'] = '0'
     os.environ['RWKV_T_MAX'] = os.environ.get('RWKV_T_MAX', '4096')
@@ -50,6 +50,7 @@ def create_arg_parser():
     parser.add_argument('--config_file', type=str,default='configs/test_hybrid.yaml', help='training config file')
     parser.add_argument('--preprocessed_data',type=str,nargs='+',help='preprocessed data directory')
     parser.add_argument('--raw_data',type=str,nargs='+',help='raw data directory')
+    parser.add_argument('--need_to_pad',action='store_true',default=False,help='whether to pad the input with other sample to fill the sample to max length')
     parser.add_argument('--output_dir', type=str, default='/data/rwkv/tmp',help='directory to save the trained model')
     parser.add_argument('--num_epochs', type=int, default=1, help='number of epochs to train the model')
     parser.add_argument('--max_seq_length', type=int, default=512, help='maximum sequence length to train the model')
@@ -433,7 +434,8 @@ if __name__ == '__main__':
         data_collator = TypedStreamingCLMDataCollator(tokenizer=tokenizer, 
                                                   max_length=args.max_seq_length, 
                                                   min_length=args.max_seq_length, 
-                                                  typed_dataset=typed_dataset)
+                                                  typed_dataset=typed_dataset,
+                                                  need_to_pad=args.need_to_pad)
         from torch.utils.data.distributed import DistributedSampler
         train_sampler = DistributedSampler(
             typed_dataset,

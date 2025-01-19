@@ -297,6 +297,7 @@ class TypedStreamingCLMDataCollator:
     min_length: int
     typed_dataset: TypedDataset
     pad_to_multiple_of: Optional[int] = None
+    need_to_pad: bool = False
     
     def concatenate_if_needed(self, text: str, is_conversation: bool) -> str:
         """Concatenate text with random samples of the same type if it's too short"""
@@ -324,7 +325,7 @@ class TypedStreamingCLMDataCollator:
         texts = []
         for example in examples:
             text = example['text'] if isinstance(example['text'], str) else example['text'][0]
-            processed_text = self.concatenate_if_needed(text, example['is_conversation'])
+            processed_text = self.concatenate_if_needed(text, example['is_conversation']) if self.need_to_pad else text
             texts.append(processed_text)
         
         tokenized = self.tokenizer(

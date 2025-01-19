@@ -1,0 +1,17 @@
+flowchart TB
+    StartB([Start t=T-1]) --> LoadState
+    LoadState{"t % CHUNK_LEN == 0?"} 
+    LoadState -->|Yes| LoadS
+    LoadState -->|No| CheckMaskB
+    LoadS["Load saved state"] --> CheckMaskB
+    CheckMaskB{"mask[t] == 1?"} 
+    CheckMaskB -->|No| ZeroGrad
+    CheckMaskB -->|Yes| CalcDQ
+    ZeroGrad["dw=dq=dk=dv=da=db=0"] --> NextTB
+    CalcDQ["dq = Σ stateT[j] * dy[j]"] --> RestoreState
+    RestoreState["stateT = (stateT - k*v - b*sa) / w"] --> CalcGrad
+    CalcGrad["Calculate gradients<br>dw, dk, dv, db, da"] --> UpdateDState
+    UpdateDState["Update dstate and dstateT"] --> NextTB
+    NextTB["t = t - 1"] 
+    NextTB -->|t >= 0| LoadState
+    NextTB -->|t < 0| EndB([End])

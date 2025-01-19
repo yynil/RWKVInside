@@ -7,14 +7,16 @@ __device__ inline bf to_bf(const float & u) { return __float2bfloat16_rn(u); }
 
 typedef bf * __restrict__ F_;
 
-__global__ void forward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_, bf* y_, float* s_, float* sa_) {
+__global__ void forward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_, bf* y_, float* s_, float* sa_,const int * __restrict__ mask_) {
     constexpr int C = _C_;
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
+    const int* curr_mask = mask_ ? mask_ + bb * T : nullptr;
 
     float state[C] = {0};
     __shared__ float q[C], k[C], w[C], a[C], b[C];
 
     for (int t = 0; t < T; t++) {
+        bool is_valid = (curr_mask == nullptr || curr_mask[t] != 0);
         int ind = bb*T*H*C + t*H*C + hh * C + i;
         __syncthreads();
         q[i] = to_float(q_[ind]);
@@ -36,8 +38,10 @@ __global__ void forward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, 
 #pragma unroll
         for (int j = 0; j < C; j++) {
             float& s = state[j];
-            s = s * w[j] + sa * b[j] + k[j] * v;
-            y += s * q[j];
+            if (is_valid) {
+                s = s * w[j] + sa * b[j] + k[j] * v;
+                y += s * q[j];
+            }
         }
         y_[ind] = to_bf(y);
 
@@ -51,16 +55,45 @@ __global__ void forward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, 
     }
 }
 
-__global__ void backward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_, F_ dy_, float * __restrict__ s_, float * __restrict__ sa_, bf* dw_, bf* dq_, bf* dk_, bf* dv_, bf* da_, bf* db_) {
+__global__ void backward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_, F_ b_, F_ dy_, float * __restrict__ s_, float * __restrict__ sa_, bf* dw_, bf* dq_, bf* dk_, bf* dv_, bf* da_, bf* db_,const int * __restrict__ mask_) {
     constexpr int C = _C_;
     int bb = blockIdx.y, hh = blockIdx.x, i = threadIdx.x;
+    const int* curr_mask = mask_ ? mask_ + bb * T : nullptr;
 
     float stateT[C] = {0}, dstate[C] = {0}, dstateT[C] = {0};
     __shared__ float w[C], q[C], k[C], v[C], a[C], b[C], dy[C], sa[C], dSb_shared[C];
     float qi, wi, ki, ai, bi, dyi;
 
     for (int t = T-1; t >= 0; t--) {
+        bool is_valid = (curr_mask == nullptr || curr_mask[t] != 0);
         int ind = bb*T*H*C + t*H*C + hh * C + i;
+
+        if ((t+1)%_CHUNK_LEN_ == 0) {
+            int base = (bb*H+hh)*(T/_CHUNK_LEN_)*C*C + (t/_CHUNK_LEN_)*C*C + i*C;
+#pragma unroll
+            for (int j = 0; j < C; j++) {
+                stateT[j] = s_[base + j];
+            }
+        }
+
+        if (!is_valid) {
+            dw_[ind] = to_bf(0.0f);
+            dq_[ind] = to_bf(0.0f);
+            dk_[ind] = to_bf(0.0f);
+            dv_[ind] = to_bf(0.0f);
+            da_[ind] = to_bf(0.0f);
+            db_[ind] = to_bf(0.0f);
+            
+            // Update running gradients even for masked positions
+            // This ensures correct gradient flow to valid positions
+#pragma unroll        
+            for (int j = 0; j < C; j++) {
+                dstate[j] = dstate[j] * 1.0f;  // No change for masked positions
+                dstateT[j] = dstateT[j] * 1.0f;
+            }
+            continue;
+        }
+
         __syncthreads();
         q[i] = qi = to_float(q_[ind]);
         float wi_fac = -__expf(to_float(w_[ind]));
@@ -72,14 +105,6 @@ __global__ void backward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_,
         dy[i] = dyi = to_float(dy_[ind]);
         sa[i] = sa_[ind];
         __syncthreads();
-
-        if ((t+1)%_CHUNK_LEN_ == 0) {
-            int base = (bb*H+hh)*(T/_CHUNK_LEN_)*C*C + (t/_CHUNK_LEN_)*C*C + i*C;
-#pragma unroll
-            for (int j = 0; j < C; j++) {
-                stateT[j] = s_[base + j];
-            }
-        }
 
         float dq = 0;
 #pragma unroll
@@ -129,10 +154,10 @@ __global__ void backward_kernel(int T, int H, F_ w_, F_ q_, F_ k_, F_ v_, F_ a_,
     }
 }
 
-void cuda_forward(int B, int T, int H, bf*w, bf*q, bf*k, bf*v, bf*z, bf*a, bf*y, float*s, float*sa) {
-    forward_kernel<<<dim3(H,B), dim3(_C_)>>>(T,H,w,q,k,v,z,a,y,s,sa);
+void cuda_forward(int B, int T, int H, bf*w, bf*q, bf*k, bf*v, bf*z, bf*a, bf*y, float*s, float*sa, const int* mask) {
+    forward_kernel<<<dim3(H,B), dim3(_C_)>>>(T,H,w,q,k,v,z,a,y,s,sa,mask);
 }
-void cuda_backward(int B, int T, int H, bf*w, bf*q, bf*k, bf*v, bf*z, bf*a, bf*dy, float*s, float*sa, bf*dw, bf*dq, bf*dk, bf*dv, bf*dz, bf*da) {
+void cuda_backward(int B, int T, int H, bf*w, bf*q, bf*k, bf*v, bf*z, bf*a, bf*dy, float*s, float*sa, bf*dw, bf*dq, bf*dk, bf*dv, bf*dz, bf*da, const int* mask) {
     assert(T%_CHUNK_LEN_ == 0);
-    backward_kernel<<<dim3(H,B), dim3(_C_)>>>(T,H,w,q,k,v,z,a,dy,s,sa,dw,dq,dk,dv,dz,da);
+    backward_kernel<<<dim3(H,B), dim3(_C_)>>>(T,H,w,q,k,v,z,a,dy,s,sa,dw,dq,dk,dv,dz,da,mask);
 }

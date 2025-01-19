@@ -27,7 +27,8 @@ HAS_GROUP_NOMR=""
 FREEZE_MLP=""
 TEACHER_MODEL_ID=""
 GATE_FREE=""
-while getopts "c:o:p:n:m:b:a:l:f:w:k:g:d:F:s:R:W:S:t:T:W:P:r:G:M:z:i:D:e:" opt; do
+NEED_TO_PAD=""
+while getopts "c:o:p:n:m:b:a:l:f:w:k:g:d:F:s:R:W:S:t:T:W:P:r:G:M:z:i:D:e:N:" opt; do
     case $opt in
         c) CONFIG_FILE="$OPTARG";;
         o) OUTPUT_DIR="$OPTARG";;
@@ -57,6 +58,7 @@ while getopts "c:o:p:n:m:b:a:l:f:w:k:g:d:F:s:R:W:S:t:T:W:P:r:G:M:z:i:D:e:" opt; 
         z) FREEZE_MLP="--freeze_mlp";;
         i) TEACHER_MODEL_ID="--teacher_model_id $OPTARG";;
         e) GATE_FREE="--gate_free";;
+        N) NEED_TO_PAD="--need_to_pad";;
         \?) echo "无效的选项 -$OPTARG" >&2; exit 1;;
     esac
 done
@@ -78,6 +80,7 @@ deepspeed \
     $PREPROCESSED_DATA \
     $RAW_DATA_DIR \
     $HAS_GROUP_NOMR \
+    $NEED_TO_PAD \
     --num_devices $GPUS_PER_NODE \
     --num_nodes $NNODES \
     --micro_bsz $MICRO_BSZ \

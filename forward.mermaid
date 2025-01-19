@@ -1,0 +1,16 @@
+flowchart TB
+    Start([Start t=0]) --> CheckMask
+    CheckMask{"mask[t] == 1?"} 
+    CheckMask -->|Yes| SA
+    CheckMask -->|No| Skip["sa = 0<br>y = 0"]
+    SA["sa = Σ a[j] * state[j]"] --> StateUpdate
+    StateUpdate["state = state * w + sa * b + k * v"] --> Output
+    Output["y = Σ state[j] * q[j]"] --> SaveState
+    Skip --> SaveState
+    SaveState{"t % CHUNK_LEN == 0?"} 
+    SaveState -->|Yes| Store
+    SaveState -->|No| NextT
+    Store["Store state to s_"] --> NextT
+    NextT["t = t + 1"] 
+    NextT -->|t < T| CheckMask
+    NextT -->|t = T| End([End])

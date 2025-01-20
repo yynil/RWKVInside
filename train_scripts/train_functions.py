@@ -249,7 +249,7 @@ def train_step(model, batch, args, teacher_engine=None, tokenizer=None):
         student_outputs = get_student_outputs(
             model, args, input_ids, labels, attention_mask)
         loss, kl_loss, student_ce_loss = compute_kl_loss(
-            student_outputs, teacher_logits, labels, args)
+            student_outputs, teacher_logits, labels, args,attention_mask=attention_mask)
     elif args.stage == 1:
         student_outputs = get_student_outputs(
             model, args, input_ids, labels, attention_mask)
@@ -292,31 +292,56 @@ def get_teacher_outputs(teacher_model, input_ids, attention_mask, labels, args):
     return teacher_logits,  teacher_loss
 
 @time_function
-def compute_kl_loss(student_outputs, teacher_logits, labels, args, chunk_size=4096):
+def compute_kl_loss(student_outputs, teacher_logits, labels, args, attention_mask=None, chunk_size=4096):
     student_logits = student_outputs.logits  # shape: [batch_size, seq_len, vocab_size]
     vocab_student = student_logits.shape[-1]
     vocab_teacher = teacher_logits.shape[-1]
-    #usually vocab_student = vocab_teacher if vocab_teacher is larger than vocab_student, we need to truncate teacher logits since we assume the truncated part is not used
+    
+    # Truncate teacher logits if necessary
     if vocab_teacher > vocab_student:
         teacher_logits = teacher_logits[:, :, :vocab_student]
+    
     if args.enable_AKL:
-        kl_loss = compute_adaptive_kl_loss(student_logits, teacher_logits)
+        # For Adaptive KL loss, we'll modify the internal computation
+        kl_loss = compute_adaptive_kl_loss(
+            student_logits, 
+            teacher_logits,
+            attention_mask=attention_mask  # Pass attention mask to AKL function
+        )
     else:
+        # Compute softmax for student and teacher
+        log_probs_student = F.log_softmax(student_logits, dim=-1)  # [batch_size, seq_len, vocab_size]
+        targets = F.softmax(teacher_logits, dim=-1)    # [batch_size, seq_len, vocab_size]
         
-        # 先对整个序列计算 softmax，保证归一化范围一致
-        log_probs_student = F.log_softmax(student_logits, dim=-1)  # 在词表维度上做 softmax
-
-        targets = F.softmax(teacher_logits, dim=-1)
+        # Compute KL divergence without reduction
+        kl_div_all = F.kl_div(
+            log_probs_student,
+            targets,
+            reduction='none'  # Keep the full tensor to apply mask
+        )  # [batch_size, seq_len, vocab_size]
         
-        kl_loss = F.kl_div(
-                log_probs_student,
-                targets,
-                reduction='batchmean'
-            )
-        del log_probs_student, targets
+        # Sum across vocabulary dimension first
+        kl_div_per_token = kl_div_all.sum(dim=-1)  # [batch_size, seq_len]
+        
+        if attention_mask is not None:
+            # Apply attention mask and compute mean only over attended positions
+            masked_kl = kl_div_per_token * attention_mask
+            kl_loss = masked_kl.sum() / (attention_mask.sum() + 1e-6)  # Add small epsilon for numerical stability
+        else:
+            # If no mask provided, take mean over all tokens
+            kl_loss = kl_div_per_token.mean()
+        
+        del log_probs_student, targets, kl_div_all, kl_div_per_token
+    
+    # Get cross entropy loss from student outputs
     student_cross_entropy_loss = student_outputs.loss
+    
+    # Combine losses using weights from args
     loss = args.kl_weight * kl_loss + args.ce_weight * student_cross_entropy_loss
+    
     del student_logits, teacher_logits, labels
+    if attention_mask is not None:
+        del attention_mask
     return loss, kl_loss, student_cross_entropy_loss
 
 import torch
@@ -429,114 +454,118 @@ def find_cutoff_with_iterative_topk(probs: torch.Tensor, mu: float, k_top: int =
 def compute_adaptive_kl_loss(
     student_logits: torch.Tensor,
     teacher_logits: torch.Tensor,
+    attention_mask: torch.Tensor = None,  # Added attention_mask parameter
     mu: float = 0.5,
     k_top: int = 512,
     debug: bool = True,
     eps: float = 1e-8
 ) -> torch.Tensor:
     """
-    Memory-optimized Adaptive KL Loss using iterative top-k search
+    Memory-optimized Adaptive KL Loss using iterative top-k search with attention mask support
     """
     global stats
     
-    # 添加数值稳定性的 softmax
+    # Add numerical stability and apply softmax
     student_probs = F.softmax(student_logits, dim=-1).clamp(min=eps)
     teacher_probs = F.softmax(teacher_logits, dim=-1).clamp(min=eps)
     
-    # if debug and deepspeed.comm.get_rank() == 0:
-    #     # 在计算开始时检查输入
-    #     logging.info(f"\nInput stats:")
-    #     logging.info(f"student_logits range: [{student_logits.min():.4e}, {student_logits.max():.4e}]")
-    #     logging.info(f"teacher_logits range: [{teacher_logits.min():.4e}, {teacher_logits.max():.4e}]")
-    #     logging.info(f"student_probs sum: {student_probs.sum(-1).mean():.4f}")
-    #     logging.info(f"teacher_probs sum: {teacher_probs.sum(-1).mean():.4f}")
-
     batch_size, seq_len, vocab_size = teacher_probs.shape
     device = teacher_probs.device
 
+    # Get mask matrix M and other outputs
     M, cutoff_points, within_first_topk, iterations = find_cutoff_with_iterative_topk(
         teacher_probs, mu, k_top)
-    # 更新统计信息
+        
+    # Update statistics
     stats.cutoff_positions.append(cutoff_points.float().mean().item())
     stats.iteration_counts.append(iterations)
     stats.total_calls += 1
-    # 计算 gaps 并添加诊断信息
+    
+    # Calculate gaps
     gaps = torch.abs(teacher_probs - student_probs)
-    g_head = torch.sum(M * gaps, dim=-1)
-    g_tail = torch.sum((1 - M) * gaps, dim=-1)
+    g_head = torch.sum(M * gaps, dim=-1)  # [batch_size, seq_len]
+    g_tail = torch.sum((1 - M) * gaps, dim=-1)  # [batch_size, seq_len]
     
     total_gap = g_head + g_tail
     
-    # if debug and deepspeed.comm.get_rank() == 0:
-    #     logging.info(f"\nGaps stats:")
-    #     logging.info(f"gaps range: [{gaps.min():.4e}, {gaps.max():.4e}]")
-    #     logging.info(f"g_head range: [{g_head.min():.4e}, {g_head.max():.4e}]")
-    #     logging.info(f"g_tail range: [{g_tail.min():.4e}, {g_tail.max():.4e}]")
-    #     logging.info(f"total_gap range: [{total_gap.min():.4e}, {total_gap.max():.4e}]")
-    
-    # 修改权重计算，增加数值稳定性
+    # Calculate weights with numerical stability
     w_head = torch.where(total_gap > eps, 
                         g_head / (total_gap + eps), 
                         0.5 * torch.ones_like(g_head))
-    w_head = w_head.clamp(0.0, 1.0)  # 确保权重在有效范围内
+    w_head = w_head.clamp(0.0, 1.0)
     w_tail = 1 - w_head
     
-    # 计算 log_probs 时添加 clamp
+    # Calculate log probabilities
     student_log_probs = torch.log(student_probs.clamp(min=eps))
     teacher_log_probs = torch.log(teacher_probs.clamp(min=eps))
     
-    # 分别计算 KL 散度的组件
+    # Calculate KL divergence components
     fkl_components = F.kl_div(
         student_log_probs.flatten(0, 1),
         teacher_probs.flatten(0, 1),
         reduction='none',
         log_target=False
-    )
+    ).view(batch_size, seq_len, -1)  # Reshape back to [batch_size, seq_len, vocab_size]
     
     rkl_components = F.kl_div(
         teacher_log_probs.flatten(0, 1),
         student_probs.flatten(0, 1),
         reduction='none',
         log_target=False
-    )
+    ).view(batch_size, seq_len, -1)  # Reshape back to [batch_size, seq_len, vocab_size]
     
-    # 在求和之前检查数值
-    # if debug and deepspeed.comm.get_rank() == 0:
-    #     logging.info(f"\nKL components stats:")
-    #     logging.info(f"fkl_components range: [{fkl_components.min():.4e}, {fkl_components.max():.4e}]")
-    #     logging.info(f"rkl_components range: [{rkl_components.min():.4e}, {rkl_components.max():.4e}]")
+    # Sum over vocabulary dimension
+    fkl = fkl_components.sum(-1).clamp(max=1e3)  # [batch_size, seq_len]
+    rkl = rkl_components.sum(-1).clamp(max=1e3)  # [batch_size, seq_len]
     
-    # 添加 clamp 来防止极端值
-    fkl = fkl_components.sum(-1).view(batch_size, -1).clamp(max=1e3)
-    rkl = rkl_components.sum(-1).view(batch_size, -1).clamp(max=1e3)
+    # Calculate weighted loss
+    token_loss = w_head * fkl + w_tail * rkl  # [batch_size, seq_len]
     
-    loss = w_head * fkl + w_tail * rkl
+    # Apply attention mask if provided
+    if attention_mask is not None:
+        token_loss = token_loss * attention_mask
+        # Normalize by the number of attended tokens
+        final_loss = token_loss.sum() / (attention_mask.sum() + eps)
+    else:
+        # If no mask provided, take mean over all tokens
+        final_loss = token_loss.mean()
     
-    if debug and (torch.isnan(loss).any() or torch.isinf(loss).any()):
+    # Handle NaN or Inf values
+    if debug and (torch.isnan(final_loss).any() or torch.isinf(final_loss).any()):
         logging.error("\n=== Error in AKL Loss ===")
         logging.error(f"NaN or Inf detected in loss")
         logging.error(f"cutoff_points stats: mean={cutoff_points.float().mean():.2f}, min={cutoff_points.min().item()}, max={cutoff_points.max().item()}")
         logging.error(f"w_head stats: mean={w_head.mean():.4f}, min={w_head.min():.4f}, max={w_head.max():.4f}")
         logging.error(f"Loss components - fkl: mean={fkl.mean():.4f}, rkl: mean={rkl.mean():.4f}")
-        # 添加新的调试信息
         logging.error(f"student_probs stats: mean={student_probs.mean():.4e}, min={student_probs.min():.4e}, max={student_probs.max():.4e}")
         logging.error(f"teacher_probs stats: mean={teacher_probs.mean():.4e}, min={teacher_probs.min():.4e}, max={teacher_probs.max():.4e}")
-        # change nan to 10
-        loss[torch.isnan(loss)] = 10
-        loss[torch.isinf(loss)] = 10
+        if attention_mask is not None:
+            logging.error(f"attention_mask stats: sum={attention_mask.sum():.4f}, mean={attention_mask.float().mean():.4f}")
+        # Replace nan/inf values with 10
+        final_loss = torch.tensor(10.0, device=device)
     
+    # Log statistics periodically
     if stats.total_calls % 100 == 0 and deepspeed.comm.get_rank() == 0:
         avg_cutoff = sum(stats.cutoff_positions) / len(stats.cutoff_positions)
         avg_iterations = float(sum(stats.iteration_counts)) / len(stats.iteration_counts)
-        vocab_size = teacher_probs.shape[-1]  # 假设 vocab_size 是最后一个维度的大小
-        logging.info(f"After {stats.total_calls} calls: Avg cutoff position = {avg_cutoff}, Avg iterations = {avg_iterations}, Current vocab_size = {vocab_size}")
+        logging.info(f"After {stats.total_calls} calls: Avg cutoff position = {avg_cutoff:.2f}, Avg iterations = {avg_iterations:.2f}, Current vocab_size = {vocab_size}")
         stats.cutoff_positions.clear()
         stats.iteration_counts.clear()
-        #log the head gap and tail gap to evaluate if the head and tail are well balanced trained
-        logging.info(f"Mean Head gap: {g_head.mean():.4f}")
-        logging.info(f"Mean Tail gap: {g_tail.mean():.4f}")
+        
+        # Log gaps with attention mask consideration
+        if attention_mask is not None:
+            masked_g_head = g_head * attention_mask
+            masked_g_tail = g_tail * attention_mask
+            mean_g_head = masked_g_head.sum() / (attention_mask.sum() + eps)
+            mean_g_tail = masked_g_tail.sum() / (attention_mask.sum() + eps)
+        else:
+            mean_g_head = g_head.mean()
+            mean_g_tail = g_tail.mean()
+        
+        logging.info(f"Mean Head gap: {mean_g_head:.4f}")
+        logging.info(f"Mean Tail gap: {mean_g_tail:.4f}")
 
-    return loss.mean()
+    return final_loss
 
 def configure_optimizer(model, args):
     lr_decay = set()

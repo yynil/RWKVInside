@@ -82,4 +82,4 @@ with gr.Blocks() as demo:
     clear.click(lambda: None, None, chatbot, queue=False)
 
 # 启动 Gradio 应用
-demo.queue().launch()
+demo.queue().launch(server_name="0.0.0.0")

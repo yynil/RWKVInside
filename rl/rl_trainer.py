@@ -2,6 +2,7 @@ import os
 import textwrap
 from typing import Any, Callable, Optional, Union
 
+from click import prompt
 import torch
 import torch.nn as nn
 import torch.utils.data
@@ -109,6 +110,7 @@ class GRPOTrainer(Trainer):
             temperature=args.temperature,
             num_return_sequences=self.num_generations,
             pad_token_id=processing_class.pad_token_id,
+            use_cache=True
         )
         self.beta = args.beta
 
@@ -129,7 +131,7 @@ class GRPOTrainer(Trainer):
             compute_metrics=compute_metrics,
             callbacks=callbacks,
             optimizers=optimizers,
-            preprocess_logits_for_metrics=preprocess_logits_for_metrics,
+            preprocess_logits_for_metrics=preprocess_logits_for_metrics
         )
 
         if self.ref_model is not None:
@@ -172,101 +174,185 @@ class GRPOTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         if return_outputs:
             raise ValueError("The GRPOTrainer does not support returning outputs")
-        # print(f'inputs: {len(inputs)}')
+
+        device = self.accelerator.device
         prompts = [x["prompt"] for x in inputs]
         prompts_text = [maybe_apply_chat_template(example, self.processing_class)["prompt"] for example in inputs]
-        # print(prompts_text)
-        prompt_inputs = self.processing_class(
-            prompts_text, return_tensors="pt", padding=True, add_special_tokens=False
-        )
-        prompt_inputs = super()._prepare_inputs(prompt_inputs)
 
-        if self.max_prompt_length is not None:
-            prompt_inputs["input_ids"] = prompt_inputs["input_ids"][:, -self.max_prompt_length:]
-            prompt_inputs["attention_mask"] = prompt_inputs["attention_mask"][:, -self.max_prompt_length:]
-            # print(f'prompt_inputs input_ids: {prompt_inputs["input_ids"].shape}')
-            # print(f'prompt_inputs attention_mask: {prompt_inputs["attention_mask"].shape}')
+        # Process each prompt individually to ensure consistent batch sizes
+        all_completions = []
+        all_prompt_ids = []
+        all_completion_ids = []
+        
+        for i in range(len(prompts_text)):
+            # Process one prompt at a time
+            prompt_inputs = self.processing_class(
+                [prompts_text[i]], return_tensors="pt", padding=True, add_special_tokens=False
+            ).to(device)
+            
+            if self.max_prompt_length is not None:
+                prompt_inputs["input_ids"] = prompt_inputs["input_ids"][:, -self.max_prompt_length:]
+                prompt_inputs["attention_mask"] = prompt_inputs["attention_mask"][:, -self.max_prompt_length:]
 
-        # Generate completions
-        with unwrap_model_for_generation(model, self.accelerator) as unwrapped_model:
-            prompt_completion_ids = unwrapped_model.generate(**prompt_inputs, generation_config=self.generation_config)
-        prompt_length = prompt_inputs["input_ids"].size(1)
-        completion_ids = prompt_completion_ids[:, prompt_length:]
+            # Generate completions with memory efficient settings
+            with unwrap_model_for_generation(model, self.accelerator) as unwrapped_model:
+                generation_config = self.generation_config
+                generation_config.do_sample = True
+                generation_config.use_cache = True
+                
+                # Generate multiple completions for this single prompt
+                prompt_completion_ids = unwrapped_model.generate(
+                    **prompt_inputs,
+                    generation_config=generation_config
+                )
+                
+            prompt_length = prompt_inputs["input_ids"].size(1)
+            
+            # Store prompt IDs for each generation
+            prompt_ids_repeated = prompt_inputs["input_ids"].repeat(self.num_generations, 1)
+            all_prompt_ids.append(prompt_ids_repeated)
+            
+            # Extract and store completion IDs
+            batch_completion_ids = prompt_completion_ids[:, prompt_length:]
+            all_completion_ids.append(batch_completion_ids)
+            
+            # Decode completions
+            batch_completions = self.processing_class.batch_decode(batch_completion_ids, skip_special_tokens=True)
+            all_completions.extend(batch_completions)
+            
+            # Clear memory after processing each prompt
+            torch.cuda.empty_cache()
+        
+        # Combine all results
+        prompt_ids = torch.cat(all_prompt_ids, dim=0)
+        completion_ids = torch.cat(all_completion_ids, dim=0)
+        # Create full sequence for each prompt-completion pair
+        prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
 
-        # Get per-token log probabilities
-        def get_per_token_logps(model, input_ids):
-            logits = model(input_ids).logits
-            logits = logits[:, :-1, :]
-            input_ids = input_ids[:, 1:]
-            per_token_logps = []
-            for logits_row, input_ids_row in zip(logits, input_ids):
-                log_probs = logits_row.log_softmax(dim=-1)
-                token_log_prob = torch.gather(log_probs, dim=1, index=input_ids_row.unsqueeze(1)).squeeze(1)
-                per_token_logps.append(token_log_prob)
-            return torch.stack(per_token_logps)
+        # Calculate log probabilities and KL divergence in chunks
+        def get_chunked_per_token_logps(model, input_ids, chunk_size=2):
+            all_per_token_logps = []
+            
+            for i in range(0, input_ids.size(0), chunk_size):
+                chunk_input_ids = input_ids[i:i + chunk_size]
+                
+                # Free up memory before computing logits
+                torch.cuda.empty_cache()
+                
+                logits = model(chunk_input_ids).logits
+                logits = logits[:, :-1, :]
+                chunk_ids = chunk_input_ids[:, 1:]
+                
+                chunk_per_token_logps = []
+                for logits_row, input_ids_row in zip(logits, chunk_ids):
+                    log_probs = logits_row.log_softmax(dim=-1)
+                    token_log_prob = torch.gather(log_probs, dim=1, 
+                                            index=input_ids_row.unsqueeze(1)).squeeze(1)
+                    chunk_per_token_logps.append(token_log_prob)
+                
+                chunk_result = torch.stack(chunk_per_token_logps)
+                all_per_token_logps.append(chunk_result)
+                
+                # Clear unnecessary tensors
+                del logits, chunk_ids, chunk_per_token_logps
+                torch.cuda.empty_cache()
+                
+            return torch.cat(all_per_token_logps, dim=0)
 
-        per_token_logps = get_per_token_logps(model, prompt_completion_ids)
+        # Calculate per-token log probabilities for model and reference model
+        current_prompt_ids = prompt_ids[i:i + self.num_generations]  # 使用已经准备好的 all_prompt_ids
+        prompt_completion_ids = torch.cat([current_prompt_ids, completion_ids], dim=1)
+        # prompt_completion_ids = torch.cat([prompt_inputs["input_ids"], completion_ids], dim=1)
+        per_token_logps = get_chunked_per_token_logps(model, prompt_completion_ids)
         per_token_logps = per_token_logps[:, prompt_length - 1:]
 
         with torch.inference_mode():
             if self.ref_model is not None:
-                ref_per_token_logps = get_per_token_logps(self.ref_model, prompt_completion_ids)
+                ref_per_token_logps = get_chunked_per_token_logps(self.ref_model, prompt_completion_ids)
             else:
                 with self.accelerator.unwrap_model(model).disable_adapter():
-                    ref_per_token_logps = get_per_token_logps(model, prompt_completion_ids)
+                    ref_per_token_logps = get_chunked_per_token_logps(model, prompt_completion_ids)
         ref_per_token_logps = ref_per_token_logps[:, prompt_length - 1:]
 
-        # Compute KL divergence
-        per_token_kl = torch.exp(ref_per_token_logps - per_token_logps) - (ref_per_token_logps - per_token_logps) - 1
+        # Calculate KL divergence in double-chunked manner
+        batch_chunk_size = 4  # Number of sequences to process at once
+        seq_chunk_size = 512  # Number of tokens to process at once within each sequence
+        
+        all_per_token_kl = []
+        
+        # Outer loop: Process sequences in chunks
+        for i in range(0, per_token_logps.size(0), batch_chunk_size):
+            batch_model_logps = per_token_logps[i:i + batch_chunk_size]  # [batch_chunk_size, seq_len]
+            batch_ref_logps = ref_per_token_logps[i:i + batch_chunk_size]  # [batch_chunk_size, seq_len]
+            
+            # Initialize KL tensor for current batch of sequences
+            seq_length = batch_model_logps.size(1)
+            batch_kl = torch.zeros_like(batch_model_logps)
+            
+            # Inner loop: Process each sequence chunk by chunk
+            for j in range(0, seq_length, seq_chunk_size):
+                end_idx = min(j + seq_chunk_size, seq_length)
+                
+                # Get chunks of the current sequences
+                chunk_model_logps = batch_model_logps[:, j:end_idx]  # [batch_chunk_size, seq_chunk_size]
+                chunk_ref_logps = batch_ref_logps[:, j:end_idx]  # [batch_chunk_size, seq_chunk_size]
+                
+                # Calculate KL divergence for this chunk
+                chunk_kl = torch.exp(chunk_ref_logps - chunk_model_logps) - \
+                        (chunk_ref_logps - chunk_model_logps) - 1
+                
+                # Store result in the corresponding positions
+                batch_kl[:, j:end_idx] = chunk_kl
+                
+                # Clear chunk tensors
+                del chunk_model_logps, chunk_ref_logps, chunk_kl
+                torch.cuda.empty_cache()
+            
+            all_per_token_kl.append(batch_kl)
+            
+            # Clear batch tensors
+            del batch_model_logps, batch_ref_logps, batch_kl
+            torch.cuda.empty_cache()
+        
+        per_token_kl = torch.cat(all_per_token_kl, dim=0)
 
-        # Mask after first EOS token
+        # Rest of the original compute_loss function remains the same
         is_eos = completion_ids == self.processing_class.eos_token_id
-        device = self.accelerator.device
         eos_idx = torch.full((is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=device)
         eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
         sequence_indices = torch.arange(is_eos.size(1), device=device).expand(is_eos.size(0), -1)
         completion_mask = (sequence_indices <= eos_idx.unsqueeze(1)).int()
 
-        # Decode completions
-        completions = self.processing_class.batch_decode(completion_ids, skip_special_tokens=True)
-        # print(f'completions: {completions}')
-
-        # Prepare inputs for reward computation
+        # Process rewards
         prompts = [prompt for prompt in prompts for _ in range(self.num_generations)]
-        reward_inputs = self.preprocess_reward_inputs(prompts, completions, inputs)
-        
-        # Compute rewards using the provided reward function
+        reward_inputs = self.preprocess_reward_inputs(prompts, all_completions, inputs)
         rewards = self.reward_function(reward_inputs)
         
         if not isinstance(rewards, torch.Tensor):
             rewards = torch.tensor(rewards, device=device)
         if rewards.dim() == 2:
             rewards = rewards.squeeze(-1)
-        rewards = rewards.to(self.accelerator.device)
-        
-        # 在生成完成后打印日志
-        if self.state.global_step % self.args.logging_steps == 0 and self.is_world_process_zero():  # Only print on rank 0
+        rewards = rewards.to(device)
+
+        # Print generation samples if needed
+        if self.state.global_step % self.args.logging_steps == 0 and self.is_world_process_zero():
             print("\n=== Step {} Generation Samples ===".format(self.state.global_step))
-            # 取batch中的第一个样本来打印
             print(f"Input prompt:\n{prompts_text[0]}\n")
             ground_truth = inputs[0].get("ground_truth", "")
             print(f"Ground truth:\n{ground_truth}\n")
-            # 打印该样本的所有生成结果和对应rewards
             start_idx = 0
             end_idx = self.num_generations
             print(f"Generated {self.num_generations} completions:")
-            for i, (completion, reward) in enumerate(zip(completions[start_idx:end_idx], 
+            for i, (completion, reward) in enumerate(zip(all_completions[start_idx:end_idx], 
                                 rewards[start_idx:end_idx])):
                 print(f"\nCompletion {i+1}:")
                 print(f"{completion}")
                 print(f"Reward: {reward.item():.3f}")
                 print("="*50)
 
-        # Compute grouped rewards
+        # Calculate final loss with normalized rewards
         mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
         std_grouped_rewards = rewards.view(-1, self.num_generations).std(dim=1)
-
-        # Normalize rewards
         mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
         std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
         advantages = (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
@@ -275,14 +361,13 @@ class GRPOTrainer(Trainer):
         per_token_loss = -(advantages - self.beta * per_token_kl)
         loss = ((per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
 
-        # Log metrics
+        # Update metrics
         self._metrics["reward"].append(self.accelerator.gather_for_metrics(rewards).mean().item())
         self._metrics["reward_std"].append(self.accelerator.gather_for_metrics(std_grouped_rewards).mean().item())
         mean_kl = ((per_token_kl * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
         self._metrics["kl"].append(self.accelerator.gather_for_metrics(mean_kl).mean().item())
 
         return loss
-
     def log(self, logs: dict[str, float], start_time: Optional[float] = None) -> None:
         # print(f'self._metrics: {self._metrics}')
         metrics = {key: sum(val)/len(val) for key, val in self._metrics.items()}

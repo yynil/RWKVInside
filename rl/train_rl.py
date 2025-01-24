@@ -28,11 +28,21 @@ def reward_function(inputs):
         ground_truth = input_data['ground_truth']
         reward = 0
         #如果包含\nthinking\n \nthinking ends\n
-        if re.search(r"\nthinking\n(.+?)\nthinking ends\n", completion):
-            reward += 0.2
+        index = completion.find("thinking\n")
+        if index != -1:
+            next_index = completion.find("thinking ends\n")
+            if next_index != -1:
+                reward += 0.2
+            else:
+                reward += 0.1
         #如果包含\nanswer\n \nanswer ends\n
-        if re.search(r"\nanswer\n(.+?)\nanswer ends\n", completion):
-            reward += 0.2
+        index = completion.find("answer\n")
+        if index != -1:
+            next_index = completion.find("answer ends\n")
+            if next_index != -1:
+                reward += 0.2
+            else:
+                reward += 0.1
         #如果正确答案在\boxed{}中，+0.2\boxed{3}
         boxed_ground_truth = f'\\boxed{{{ground_truth}}}'
         if boxed_ground_truth in completion:
@@ -47,7 +57,7 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         device_map={"": accelerator.device},
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch.float16,
     )
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     

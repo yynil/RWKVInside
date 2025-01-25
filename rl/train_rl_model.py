@@ -8,7 +8,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import datasets
 from rl_trainer import GRPOTrainer
-from trl import GRPOConfig
+from grpo_config import GRPOConfig
 import logging
 from dataclasses import dataclass, field
 from typing import Optional

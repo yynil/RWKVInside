@@ -26,6 +26,8 @@ from transformers.utils import is_peft_available
 from trl.data_utils import apply_chat_template, is_conversational, maybe_apply_chat_template
 from trl.models import create_reference_model, unwrap_model_for_generation
 from trl import GRPOConfig
+import deepspeed
+
 
 if is_peft_available():
     from peft import PeftConfig, get_peft_model
@@ -37,6 +39,7 @@ class GRPOTrainer(Trainer):
     def __init__(
         self,
         model: Union[str, PreTrainedModel, nn.Module] = None,
+        ref_model: Optional[PreTrainedModel] = None,
         reward_function: Optional[Callable[[Any], torch.Tensor]] = None,
         args: GRPOConfig = None,
         data_collator: Optional[DataCollator] = None,
@@ -51,13 +54,14 @@ class GRPOTrainer(Trainer):
         preprocess_logits_for_metrics: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
         peft_config: Optional["PeftConfig"] = None,
         preprocess_reward_inputs: Optional[Callable[[list, list, list], Any]] = None,
+        chunk_size_to_calculate_kl: int = 1
     ):
         # Args
         if args is None:
             model_name = model if isinstance(model, str) else model.config._name_or_path
             model_name = model_name.split("/")[-1]
             args = GRPOConfig(f"{model_name}-GRPO")
-
+        self.chunk_size_to_calculate_kl = chunk_size_to_calculate_kl
         # Models
         # Trained model
         model_init_kwargs = args.model_init_kwargs or {}
@@ -78,10 +82,7 @@ class GRPOTrainer(Trainer):
             model = get_peft_model(model, peft_config)
 
         # Reference model
-        if peft_config is None:
-            self.ref_model = create_reference_model(model)
-        else:
-            self.ref_model = None
+        self.ref_model = ref_model
 
         # Processing class
         if processing_class is None:
@@ -135,8 +136,21 @@ class GRPOTrainer(Trainer):
         )
 
         if self.ref_model is not None:
-            self.ref_model = self.accelerator.prepare_model(self.ref_model, evaluation_mode=True)
-
+            self.ref_model.eval()
+            orig_model = self.ref_model
+            # Initialize DeepSpeed for reference model on all processes
+            print(f"Rank {self.accelerator.process_index}: Initializing reference model with DeepSpeed")
+            ds_config = self.accelerator.deepspeed_plugin.deepspeed_config
+            engine_ref = deepspeed.initialize(
+                model=self.ref_model,
+                config=ds_config,
+                model_parameters=[],
+            )[0]
+            del orig_model
+            self.ref_model = engine_ref
+            
+            print(f'Rank {self.accelerator.process_index}: Reference model initialization complete')
+        
     def _default_preprocess_reward_inputs(self, prompts: list, completions: list, inputs: list) -> Any:
         """Default preprocessing for reward inputs.
         
@@ -222,7 +236,8 @@ class GRPOTrainer(Trainer):
             
             # Clear memory after processing each prompt
             torch.cuda.empty_cache()
-        
+            # print(f'prompt_text: {prompts_text[i]}')
+            # print(f'batch_completions: {batch_completions}')
         # Combine all results
         prompt_ids = torch.cat(all_prompt_ids, dim=0)
         completion_ids = torch.cat(all_completion_ids, dim=0)
@@ -230,12 +245,11 @@ class GRPOTrainer(Trainer):
         prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
 
         # Calculate log probabilities and KL divergence in chunks
-        def get_chunked_per_token_logps(model, input_ids, chunk_size=2):
+        def get_chunked_per_token_logps(model, input_ids, chunk_size=self.chunk_size_to_calculate_kl):
             all_per_token_logps = []
-            
+            rank = self.accelerator.process_index
             for i in range(0, input_ids.size(0), chunk_size):
                 chunk_input_ids = input_ids[i:i + chunk_size]
-                
                 # Free up memory before computing logits
                 torch.cuda.empty_cache()
                 
@@ -267,11 +281,8 @@ class GRPOTrainer(Trainer):
         per_token_logps = per_token_logps[:, prompt_length - 1:]
 
         with torch.inference_mode():
-            if self.ref_model is not None:
-                ref_per_token_logps = get_chunked_per_token_logps(self.ref_model, prompt_completion_ids)
-            else:
-                with self.accelerator.unwrap_model(model).disable_adapter():
-                    ref_per_token_logps = get_chunked_per_token_logps(model, prompt_completion_ids)
+            self.ref_model.eval()
+            ref_per_token_logps = get_chunked_per_token_logps(self.ref_model, prompt_completion_ids)
         ref_per_token_logps = ref_per_token_logps[:, prompt_length - 1:]
 
         # Calculate KL divergence in double-chunked manner
@@ -333,9 +344,10 @@ class GRPOTrainer(Trainer):
         if rewards.dim() == 2:
             rewards = rewards.squeeze(-1)
         rewards = rewards.to(device)
+        
 
         # Print generation samples if needed
-        if self.state.global_step % self.args.logging_steps == 0 and self.is_world_process_zero():
+        if self.state.global_step % self.args.logging_steps == 0 and self.is_world_process_zero() and self.state.global_step > 0:
             print("\n=== Step {} Generation Samples ===".format(self.state.global_step))
             print(f"Input prompt:\n{prompts_text[0]}\n")
             ground_truth = inputs[0].get("ground_truth", "")
@@ -362,12 +374,39 @@ class GRPOTrainer(Trainer):
         loss = ((per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
 
         # Update metrics
-        self._metrics["reward"].append(self.accelerator.gather_for_metrics(rewards).mean().item())
-        self._metrics["reward_std"].append(self.accelerator.gather_for_metrics(std_grouped_rewards).mean().item())
+        mean_reward_value = self.accelerator.gather_for_metrics(rewards).mean().item()
+        self._metrics["reward"].append(mean_reward_value)
+        mean_reward_std_dev = self.accelerator.gather_for_metrics(std_grouped_rewards).mean().item()
+        self._metrics["reward_std"].append(mean_reward_std_dev)
         mean_kl = ((per_token_kl * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
-        self._metrics["kl"].append(self.accelerator.gather_for_metrics(mean_kl).mean().item())
-
+        mean_kl_metric = self.accelerator.gather_for_metrics(mean_kl).mean().item()
+        self._metrics["kl"].append(mean_kl_metric)
+        self.log_metrics({
+            "loss": loss.item(),
+            "mean_reward": mean_reward_value,
+            "mean_reward_std_dev": mean_reward_std_dev,
+            "kl": mean_kl_metric,
+        })
         return loss
+    
+    def log_metrics(self, metrics):
+        """Helper method to log metrics consistently"""
+        # 更新内部指标存储
+        for key, value in metrics.items():
+            if key not in self._metrics:
+                self._metrics[key] = []
+            self._metrics[key].append(value)
+        
+        # 立即更新进度条显示的指标
+        if self.state.global_step % self.args.logging_steps == 0:
+            # 计算平均值
+            avg_metrics = {
+                key: sum(values[-self.args.logging_steps:])/len(values[-self.args.logging_steps:])
+                for key, values in self._metrics.items()
+            }
+            # 使用 Trainer 的日志机制
+            self.log(avg_metrics)
+        
     def log(self, logs: dict[str, float], start_time: Optional[float] = None) -> None:
         # print(f'self._metrics: {self._metrics}')
         metrics = {key: sum(val)/len(val) for key, val in self._metrics.items()}

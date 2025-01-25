@@ -25,7 +25,8 @@ from transformers.utils import is_peft_available
 
 from trl.data_utils import apply_chat_template, is_conversational, maybe_apply_chat_template
 from trl.models import create_reference_model, unwrap_model_for_generation
-from trl import GRPOConfig
+from grpo_config import GRPOConfig
+
 import deepspeed
 
 

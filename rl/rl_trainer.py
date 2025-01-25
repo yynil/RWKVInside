@@ -117,7 +117,7 @@ class GRPOTrainer(Trainer):
         self.beta = args.beta
 
         model.warnings_issued["estimate_tokens"] = True
-        
+        model.gradient_checkpointing_enable()
         # Initialize metrics
         self._metrics = {"kl": [], "reward": [], "reward_std": []}
 
@@ -138,6 +138,8 @@ class GRPOTrainer(Trainer):
 
         if self.ref_model is not None:
             self.ref_model.eval()
+            for param in self.ref_model.parameters():
+                param.requires_grad = False  # Ensure no gradients are stored
             orig_model = self.ref_model
             # Initialize DeepSpeed for reference model on all processes
             print(f"Rank {self.accelerator.process_index}: Initializing reference model with DeepSpeed")

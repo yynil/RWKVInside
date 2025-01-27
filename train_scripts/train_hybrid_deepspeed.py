@@ -382,7 +382,7 @@ if __name__ == '__main__':
     else:
         print(f'Only self_attn params are trainable')
         for name,param in model.named_parameters():
-            if 'self_attn' in name:
+            if 'self_attn.student_attn' in name:
                 param.requires_grad = True
             else:
                 param.requires_grad = False

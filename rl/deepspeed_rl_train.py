@@ -1,0 +1,435 @@
+from multiprocessing import process
+from multiprocessing.util import is_abstract_socket_namespace
+import os
+from httpx import post
+from regex import T
+import torch
+import torch.distributed as dist
+from torch.utils.data import DataLoader, DistributedSampler
+import deepspeed
+import datasets
+import wandb
+from tqdm import tqdm
+from transformers import HfArgumentParser, AutoTokenizer,AutoModelForCausalLM
+from dataclasses import dataclass, field
+import logging
+import json
+from typing import Optional
+from grpo_trainer import GRPOTrainer, GRPOConfig, ConversationDataCollator
+from deepspeed.utils.zero_to_fp32 import convert_zero_checkpoint_to_fp32_state_dict
+from functools import partial
+from profiler import timer
+def preprocess_reward_inputs(prompts: list, completions: list, inputs: list):
+    """Default preprocessing for reward inputs.
+    
+    Args:
+        prompts: List of prompts
+        completions: List of model generated completions
+        inputs: Original input data containing additional information (e.g., problem, ground_truth)
+        
+    Returns:
+        Preprocessed inputs for reward computation, with each input repeated num_generations times
+        along with corresponding completions.
+    """
+    # Repeat each input G times to match with generated completions
+    num_generations = len(completions) // len(prompts)
+    processed_inputs = []
+    for i in range(len(prompts)):
+        start_idx = i * num_generations
+        end_idx = (i + 1) * num_generations
+        ground_truth = inputs['ground_truth'][i]
+        for j in range(start_idx, end_idx):
+            completion = completions[j]
+            processed_inputs.append({
+                "prompt": prompts[i],
+                "completion": completion,
+                "ground_truth": ground_truth
+            })
+    return processed_inputs
+    
+def reward_function(inputs):
+    """Calculate rewards based on model outputs"""
+    # logging.info(f'reward function inputs: {inputs}')
+    rewards = []
+    for input_data in inputs:
+        completion = input_data['completion']
+        ground_truth = input_data['ground_truth']
+        #check if the ground_truth is a number
+        is_number_ground_truth = False
+        try:
+            ground_truth = ground_truth.strip().replace(" ", "").replace(",", "")
+            value_ground_truth = float(ground_truth)
+            is_number_ground_truth = True
+        except ValueError:
+            is_number_ground_truth = False
+        reward = 0
+        
+        # Check for thinking structure
+        index = completion.find("thinking\n")
+        if index != -1:
+            next_index = completion.find("thinking ends\n")
+            if next_index != -1:
+                reward += 0.2
+            else:
+                reward += 0.1
+                
+        # Check for answer structure
+        index = completion.find("answer\n")
+        if index != -1:
+            next_index = completion.find("answer ends\n")
+            if next_index != -1:
+                reward += 0.2
+            else:
+                reward += 0.1
+                
+        # Check for correct answer in \boxed{} format
+        if is_number_ground_truth:
+            #found the \boxed{} format
+            index_of_boxed = completion.find("\\boxed{")
+            if index_of_boxed != -1:
+                next_index_of_boxed = completion.find("}", index_of_boxed)
+                boxed_ground_truth = completion[index_of_boxed+len("\\boxed{"):next_index_of_boxed]
+                #convert the boxed ground truth to a number
+                try:
+                    value_boxed_ground_truth = float(boxed_ground_truth)
+                    if abs(value_ground_truth - value_boxed_ground_truth) < 1e-6:
+                        reward += 0.6
+                except ValueError:
+                    pass
+        else:    
+            boxed_ground_truth = f'\\boxed{{{ground_truth}}}'
+            if boxed_ground_truth in completion:
+                reward += 0.6
+            
+        rewards.append(reward)
+    return torch.tensor(rewards, dtype=torch.float,requires_grad=True)
+@dataclass
+class ScriptArguments:
+    """Command line arguments for training script"""
+    data_file: str = field(
+        default=None,
+        metadata={"help": "Path to training data file (JSONL format)"}
+    )
+    model_name: str = field(
+        default=None,
+        metadata={"help": "Path or name of pretrained model"}
+    )
+    output_dir: str = field(
+        default=None,
+        metadata={"help": "Directory to save trained model"}
+    )
+    deepspeed_config: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to DeepSpeed config file"}
+    )
+    num_epochs: int = field(
+        default=3,
+        metadata={"help": "Number of training epochs"}
+    )
+    per_device_train_batch_size: int = field(
+        default=1,
+        metadata={"help": "Training batch size per device"}
+    )
+    learning_rate: float = field(
+        default=1e-5,
+        metadata={"help": "Learning rate"}
+    )
+    weight_decay: float = field(
+        default=0.01,
+        metadata={"help": "Weight decay"}
+    )
+    warmup_steps: int = field(
+        default=100,
+        metadata={"help": "Number of warmup steps"}
+    )
+    gradient_accumulation_steps: int = field(
+        default=1,
+        metadata={"help": "Number of gradient accumulation steps"}
+    )
+    max_prompt_length: int = field(
+        default=512,
+        metadata={"help": "Maximum length for input prompts"}
+    )
+    max_completion_length: int = field(
+        default=1024,
+        metadata={"help": "Maximum length for generated completions"}
+    )
+    num_generations: int = field(
+        default=4,
+        metadata={"help": "Number of generations per prompt"}
+    )
+    temperature: float = field(
+        default=0.7,
+        metadata={"help": "Temperature for generation sampling"}
+    )
+    beta: float = field(
+        default=0.1,
+        metadata={"help": "KL divergence weight"}
+    )
+    logging_steps: int = field(
+        default=100,
+        metadata={"help": "Number of steps between logging"}
+    )
+    save_steps: int = field(
+        default=500,
+        metadata={"help": "Number of steps between saving checkpoints"}
+    )
+    local_rank: int = field(
+        default=-1,
+        metadata={"help": "Local rank for distributed training"}
+    )
+    seed: int = field(
+        default=42,
+        metadata={"help": "Random seed"}
+    )
+    wandb_project: str = field(
+        default="grpo-training",
+        metadata={"help": "Name of W&B project"}
+    )
+    wandb_run_name: str = field(
+        default=None,
+        metadata={"help": "Name of W&B run"}
+    )
+    gradient_checkpointing: bool = field(
+        default=False,
+        metadata={"help": "Use gradient checkpointing"}
+    )
+
+def setup_logging(local_rank):
+    """Configure logging"""
+    if local_rank <= 0:
+        logging.basicConfig(
+            format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+            datefmt="%m/%d/%Y %H:%M:%S",
+            level=logging.INFO,
+        )
+
+def load_dataset(data_file):
+    """Load and preprocess the training dataset"""
+    dataset = datasets.load_dataset("json", data_files=data_file)["train"]
+    return dataset
+
+def configure_optimizer(model, args):
+    lr_1x = set()
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        lr_1x.add(n)
+
+    lr_1x = sorted(list(lr_1x))
+    param_dict = {n: p for n, p in model.named_parameters()}
+    
+    optim_groups = [{"params": [param_dict[n] for n in lr_1x], "weight_decay": 0.0, "my_lr_scale": 1.0}]
+
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+    optimizer = DeepSpeedCPUAdam(optim_groups, lr=args.learning_rate, betas=(0.9, 0.999),  bias_correction=True, adamw_mode=True, amsgrad=False)
+  
+    return optimizer
+
+def main():
+    # Parse arguments
+    parser = HfArgumentParser(ScriptArguments)
+    args = parser.parse_args_into_dataclasses()[0]
+    
+    # Setup environment variables
+    local_rank = int(os.getenv('LOCAL_RANK', '0'))
+    world_size = int(os.getenv('WORLD_SIZE', '1'))
+    is_main_process = local_rank == 0
+    device = torch.device(f'cuda:{local_rank}')
+    
+    # Setup logging
+    setup_logging(local_rank)
+    logger = logging.getLogger(__name__)
+    
+    if is_main_process:
+        logger.info("Starting GRPO training with DeepSpeed")
+        logger.info(f"Arguments: {args}")
+
+    # Set random seed
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+    
+    # Initialize tokenizer
+    if is_main_process:
+        logger.info(f"Loading tokenizer from {args.model_name}")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    # Load dataset
+    if is_main_process:
+        logger.info(f"Loading dataset from {args.data_file}")
+    dataset = load_dataset(args.data_file)
+    
+    # Setup data loading
+    if is_main_process:
+        logger.info(f"Creating DataLoader with batch size {args.per_device_train_batch_size}, world size {world_size}")
+    sampler = DistributedSampler(
+        dataset,
+        num_replicas=world_size,
+        rank=local_rank,
+        shuffle=True,
+        seed=args.seed
+    )
+    
+    data_collator = ConversationDataCollator()
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.per_device_train_batch_size,
+        sampler=sampler,
+        num_workers=4,
+        pin_memory=True,
+        drop_last=True,
+        collate_fn=data_collator
+    )
+    
+    # Load DeepSpeed config
+    if args.deepspeed_config:
+        if is_main_process:
+            logger.info(f"Loading DeepSpeed config from {args.deepspeed_config}")
+        with open(args.deepspeed_config, 'r') as f:
+            ds_config = json.load(f)
+    else:
+        # Default DeepSpeed config is using ZeRO-3 with CPU offload
+        if is_main_process:
+            logger.info("Using default DeepSpeed config")
+        train_batch_size = args.per_device_train_batch_size * world_size* args.gradient_accumulation_steps
+        ds_config = {
+                "distributed_backend": "nccl",
+                "train_batch_size": train_batch_size,
+                "bf16": {
+                    "enabled": True
+                },
+                "zero_optimization": {
+                    "stage": 3,
+                    "stage3_max_live_parameters": 1e9,
+                    "stage3_max_reuse_distance": 1e9,
+                    "stage3_prefetch_bucket_size": 5e6,
+                    "memory_efficient_linear": True,
+                    "stage3_param_persistence_threshold": 1e4,
+                    "offload_param": {
+                        "device": "cpu",
+                        "pin_memory": True,
+                        "buffer_count": 4,
+                        "buffer_size": 1e8
+                    },
+                    "offload_optimizer": {
+                        "device": "cpu",
+                        "pin_memory": True,
+                        "buffer_count": 4
+                    },
+                    "allgather_partitions": True,
+                    "reduce_scatter": True,
+                    "reduce_bucket_size": 5e6,
+                    "overlap_comm": True,
+                    "contiguous_gradients": True
+                },
+                "zero_force_ds_cpu_initialization": True,
+                "gradient_checkpointing": args.gradient_checkpointing,
+                "dump_state": True
+            }
+        
+    #Init model with deepspeed
+    if is_main_process:
+        logger.info(f"Initializing model with DeepSpeed config")
+    model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16)
+    if is_main_process:
+        logger.info(f'Enable gradient checkpointing: {args.gradient_checkpointing}')
+    if args.gradient_checkpointing:
+        model.gradient_checkpointing_enable()
+    model.train()
+    if is_main_process:
+        logger.info(f'start configuring optimizer')
+    optimizer = configure_optimizer(model, args)
+    # Initialize DeepSpeed for main model
+    model_engine, optimizer, _, scheduler = deepspeed.initialize(
+            model=model,
+            config=ds_config,
+            model_parameters=model.parameters(),
+            optimizer=optimizer
+    )
+    timer.initialize_with_engine(model_engine)
+    if is_main_process:
+        logger.info("Model initialized")
+    del model
+    # Initialize reference model
+    if is_main_process:
+        logger.info(f"Initializing reference model")
+    ref_model = AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16)
+    ref_model.eval()
+    #freeze all parameters of reference model
+    for param in ref_model.parameters():
+        param.requires_grad = False
+    ref_ds_config = ds_config.copy()
+    del ref_ds_config["zero_optimization"]["offload_optimizer"] 
+    ref_model_engine, _, _, _ = deepspeed.initialize(
+            model=ref_model,
+            config=ref_ds_config
+    )
+    del ref_model
+    if is_main_process:
+        logger.info("Reference model initialized")
+    if is_main_process:
+        logger.info(f'current gpu memory AFTER setting model and ref model: {torch.cuda.memory_summary(device=None, abbreviated=False)}')
+        logger.info(f'Start training with {len(dataloader)} batches')
+    
+    training_args = GRPOConfig(
+        output_dir=args.output_dir,
+        num_train_epochs=args.num_epochs,
+        per_device_train_batch_size=args.per_device_train_batch_size,
+        learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay,
+        warmup_steps=args.warmup_steps,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        max_prompt_length=args.max_prompt_length,
+        max_completion_length=args.max_completion_length,
+        num_generations=args.num_generations,
+        temperature=args.temperature,
+        beta=args.beta,
+        logging_steps=args.logging_steps,
+        save_steps=args.save_steps,
+        local_rank=args.local_rank
+    )
+    trainer = GRPOTrainer(
+        model_engine,
+        ref_model_engine,
+        training_args,
+        tokenizer,
+        reward_function,
+        preprocess_reward_inputs=preprocess_reward_inputs
+    )
+    if is_main_process:
+        from tqdm import tqdm
+        pbar = tqdm(total=len(dataloader))
+    for epoch in range(args.num_epochs):
+        if is_main_process:
+            logger.info(f"Epoch {epoch} starts training")
+        for batch_idx,batch in enumerate(dataloader):
+            loss,reward_mean,reward_std,mean_kl = trainer.train_step(batch)
+            model_engine.backward(loss)
+            model_engine.step()
+            if is_main_process:
+                pbar.update(1)
+                pbar.set_postfix({'loss':loss.item(),'reward_mean':reward_mean.item(),'reward_std':reward_std.item(),'kl':mean_kl.item()})
+
+    # # Initialize wandb if main process
+    # if is_main_process and os.getenv("WANDB_MODE") != "disabled":
+    #     wandb.init(project="grpo-training")
+
+    # # Start training
+    # train(trainer, args, dataloader, sampler, device, world_size, is_main_process)
+
+    # # Convert final checkpoint to fp32 if needed
+    # if local_rank <= 0:
+    #     logger.info("Converting final checkpoint to fp32...")
+    #     final_checkpoint = os.path.join(args.output_dir, "final")
+    #     output_state_dict = os.path.join(args.output_dir, "pytorch_model.bin")
+    #     convert_zero_checkpoint_to_fp32_state_dict(final_checkpoint, output_state_dict)
+    #     logger.info(f"Final model saved to {output_state_dict}")
+
+    # # Cleanup
+    # trainer.destroy()
+
+if __name__ == "__main__":
+    main()

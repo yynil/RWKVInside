@@ -254,14 +254,16 @@ def train_step(model, batch, args, teacher_engine=None, tokenizer=None):
         student_outputs = get_student_outputs(
             model, args, input_ids, labels, attention_mask)
         loss, kl_loss, student_ce_loss = get_attn_loss(
-            input_ids, student_outputs)
+            args, student_outputs)
         teacher_loss = None
         
     return loss, teacher_loss, kl_loss, student_ce_loss
     
 @time_function
-def get_attn_loss(input_ids, student_outputs):
-    loss = torch.stack(student_outputs.attentions, dim=0).mean()
+def get_attn_loss(args, student_outputs):
+    attn_from_wrapper = [student_outputs.attentions[i] for i in args.layers]
+    # print(f'attn_from_wrapper {attn_from_wrapper}')
+    loss = torch.stack(attn_from_wrapper, dim=0).mean()
     kl_loss = None
     student_cross_entropy_loss = None
     return loss,kl_loss,student_cross_entropy_loss

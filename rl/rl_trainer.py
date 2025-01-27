@@ -27,7 +27,6 @@ from trl.data_utils import apply_chat_template, is_conversational, maybe_apply_c
 from trl.models import create_reference_model, unwrap_model_for_generation
 from grpo_config import GRPOConfig
 
-import deepspeed
 
 
 if is_peft_available():
@@ -117,7 +116,7 @@ class GRPOTrainer(Trainer):
         self.beta = args.beta
 
         model.warnings_issued["estimate_tokens"] = True
-        model.gradient_checkpointing_enable()
+        # model.gradient_checkpointing_enable()
         # Initialize metrics
         self._metrics = {"kl": [], "reward": [], "reward_std": []}
 
@@ -140,19 +139,7 @@ class GRPOTrainer(Trainer):
             self.ref_model.eval()
             for param in self.ref_model.parameters():
                 param.requires_grad = False  # Ensure no gradients are stored
-            orig_model = self.ref_model
-            # Initialize DeepSpeed for reference model on all processes
-            print(f"Rank {self.accelerator.process_index}: Initializing reference model with DeepSpeed")
-            ds_config = self.accelerator.deepspeed_plugin.deepspeed_config
-            engine_ref = deepspeed.initialize(
-                model=self.ref_model,
-                config=ds_config,
-                model_parameters=[],
-            )[0]
-            del orig_model
-            self.ref_model = engine_ref
-            
-            print(f'Rank {self.accelerator.process_index}: Reference model initialization complete')
+            self.ref_model.to(self.accelerator.device)
         
     def _default_preprocess_reward_inputs(self, prompts: list, completions: list, inputs: list) -> Any:
         """Default preprocessing for reward inputs.
@@ -216,12 +203,15 @@ class GRPOTrainer(Trainer):
                 generation_config = self.generation_config
                 generation_config.do_sample = True
                 generation_config.use_cache = True
+                with unwrap_model_for_generation(model, self.accelerator) as unwrapped_model:
+                    print(f'device of unwrapped_model: {unwrapped_model.device}')
+                    prompt_completion_ids = unwrapped_model.generate(**prompt_inputs, generation_config=generation_config)
                 
                 # Generate multiple completions for this single prompt
-                prompt_completion_ids = unwrapped_model.generate(
-                    **prompt_inputs,
-                    generation_config=generation_config
-                )
+                # prompt_completion_ids = unwrapped_model.generate(
+                #         **prompt_inputs,
+                #         generation_config=generation_config
+                #     )
                 
             prompt_length = prompt_inputs["input_ids"].size(1)
             

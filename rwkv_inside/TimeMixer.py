@@ -120,7 +120,9 @@ class RWKV_Tmix_x070(torch.nn.Module):
             self.x_k = nn.Parameter(1.0 - (torch.pow(ddd, 0.9 * ratio_1_to_almost0) + 0.4 * ratio_0_to_1))
             self.x_v = nn.Parameter(1.0 - (torch.pow(ddd, 0.4 * ratio_1_to_almost0) + 0.6 * ratio_0_to_1))
             self.x_a = nn.Parameter(1.0 - torch.pow(ddd, 0.9 * ratio_1_to_almost0))
-            self.x_g = nn.Parameter(1.0 - torch.pow(ddd, 0.2 * ratio_1_to_almost0))
+            # self.x_g = nn.Parameter(1.0 - torch.pow(ddd, 0.2 * ratio_1_to_almost0))
+            self.x_g = nn.Parameter(torch.ones(1, 1, C))#make x_g to be 1.0 as initialized values
+            
 
             def ortho_init(x, scale):
                 with torch.no_grad():

@@ -28,7 +28,8 @@ FREEZE_MLP=""
 TEACHER_MODEL_ID=""
 GATE_FREE=""
 NEED_TO_PAD=""
-while getopts "c:o:p:n:m:b:a:l:f:w:k:g:d:F:s:R:W:S:t:T:W:P:r:G:M:z:i:D:e:N:" opt; do
+MAX_EPOCHES=1
+while getopts "c:o:p:n:m:b:a:l:f:w:k:g:d:F:s:R:W:S:t:T:W:P:r:G:M:z:i:D:e:N:X:" opt; do
     case $opt in
         c) CONFIG_FILE="$OPTARG";;
         o) OUTPUT_DIR="$OPTARG";;
@@ -59,6 +60,7 @@ while getopts "c:o:p:n:m:b:a:l:f:w:k:g:d:F:s:R:W:S:t:T:W:P:r:G:M:z:i:D:e:N:" opt
         i) TEACHER_MODEL_ID="--teacher_model_id $OPTARG";;
         e) GATE_FREE="--gate_free";;
         N) NEED_TO_PAD="--need_to_pad";;
+        X) MAX_EPOCHES="$OPTARG";;
         \?) echo "无效的选项 -$OPTARG" >&2; exit 1;;
     esac
 done
@@ -85,7 +87,7 @@ deepspeed \
     --num_nodes $NNODES \
     --micro_bsz $MICRO_BSZ \
     --accumulate_grad_batches $ACCUMULATE_GRAD_BATCHES \
-    --max_epochs 1 \
+    --max_epochs $MAX_EPOCHES \
     --wandb $WANDB \
     --run_name $WANDB_PROJECT \
     --grad_cp $GRAD_CP \

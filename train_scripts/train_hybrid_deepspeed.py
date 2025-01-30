@@ -783,9 +783,8 @@ if __name__ == '__main__':
             is_accumulation_step = (batch_idx + 1) % args.accumulate_grad_batches == 0
 
             if is_accumulation_step:
-                model_engine.step()
-                model_engine.zero_grad()
-                global_step += 1
+               global_step += 1
+            model_engine.step()
 
             # 每一步都调用 on_train_batch_end，但只在累积步骤结束时更新进度条
             last_log_time, pbar = on_train_batch_end(

@@ -1,0 +1,85 @@
+graph TD
+    A[Start train_step] --> B[Set model to train mode]
+    B --> C[Process input batch]
+    C --> D[Tokenize prompts]
+    D --> E[Generate completions]
+    E --> F[Decode completions]
+    F --> G[Compute KL divergence]
+    G --> H[Calculate rewards]
+    H --> I[Normalize rewards]
+    I --> J[Compute loss]
+    J --> K[Increment count]
+
+    K --> L{Count % logging_steps == 0}
+    L --> |Yes| M[Log samples]
+    L --> |No| N[Return loss, rewards mean, rewards std, mean KL]
+    M --> N
+
+    N --> O[End train_step]
+
+    subgraph "Process input batch"
+        C1[Extract prompts from batch]
+        C2[Apply chat template to prompts]
+        C --> C1 --> C2
+    end
+
+    subgraph "Tokenize prompts"
+        D1[Use tokenizer to convert prompts to tensors]
+        D2[Apply padding and truncation]
+        D3[Set max length to max_prompt_length]
+        D --> D1 --> D2 --> D3
+    end
+
+    subgraph "Generate completions"
+        E1[Call _generate_completions method]
+        E2[Set model to eval mode]
+        E3[Generate completions using model_engine]
+        E4[Set model back to train mode]
+        E --> E1 --> E2 --> E3 --> E4
+    end
+
+    subgraph "Decode completions"
+        F1[Extract completion_ids from generations]
+        F2[Use tokenizer to decode completion_ids]
+        F --> F1 --> F2
+    end
+
+    subgraph "Compute KL divergence"
+        G1[Call _compute_kl_divergence method]
+        G2[Compute per-token log probabilities for model]
+        G3[Compute per-token log probabilities for reference model]
+        G4[Calculate token-level KL divergence]
+        G5[Create completion mask]
+        G6[Calculate mean KL divergence]
+        G --> G1 --> G2 --> G3 --> G4 --> G5 --> G6
+    end
+
+    subgraph "Calculate rewards"
+        H1[Call reward_function]
+        H2[Preprocess reward inputs]
+        H3[Convert rewards to model's device]
+        H --> H1 --> H2 --> H3
+    end
+
+    subgraph "Normalize rewards"
+        I1[Reshape rewards]
+        I2[Calculate mean and std for each generation]
+        I3[Normalize rewards to calculate advantages]
+        I --> I1 --> I2 --> I3
+    end
+
+    subgraph "Compute loss"
+        J1[Calculate token-level loss]
+        J2[Sum token-level loss]
+        J3[Divide by completion mask sum]
+        J --> J1 --> J2 --> J3
+    end
+
+    subgraph "Log samples"
+        K1[Log step number]
+        K2[Log prompt]
+        K3[Log ground_truth]
+        K4[Log completions]
+        K5[Log rewards]
+        M --> K1 --> K2 --> K3 --> K4 --> K5
+    end

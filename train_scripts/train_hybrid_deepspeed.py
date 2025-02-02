@@ -611,7 +611,7 @@ if __name__ == '__main__':
         #print current gpu memory
         if args.local_rank == 0:
             print(f'current gpu memory AFTER initializing deepspeed: {torch.cuda.memory_summary(device=None, abbreviated=False)}')
-        if args.stage == 2:
+        if args.stage == 2 and args.is_sft == False:
             if args.local_rank == 0:
                 print(f'initializing teacher model')
                 print(f'current gpu memory BEFORE initializing teacher model: {torch.cuda.memory_summary(device=None, abbreviated=False)}')

@@ -426,7 +426,7 @@ if __name__ == '__main__':
     elif args.raw_data is not None:
         print(f'load raw data from {args.raw_data}')
         from data.raw_dataset import load_datasets_from_directories,TypedDataset,TypedStreamingCLMDataCollator
-        all_ds,feature_types = load_datasets_from_directories(args.raw_data)
+        all_ds,feature_types = load_datasets_from_directories(args.raw_data,tokenizer)
         typed_dataset = TypedDataset(all_ds, feature_types)
         # print(all_ds)
         # con_ds = datasets.concatenate_datasets(all_ds)

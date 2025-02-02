@@ -1,10 +1,11 @@
 from dataclasses import dataclass
 from typing import Dict, List, Union, Optional
 import torch
-from transformers import PreTrainedTokenizer
+from transformers import AutoTokenizer
 import datasets
 import glob
 import os
+from functools import partial
 
 def detect_format(directory) -> str:
     """
@@ -60,7 +61,7 @@ load_functions = {
     'huggingface': load_huggingface_dataset
 }
 
-def convert_conversation_to_text(example: Dict) -> Dict:
+def convert_conversation_to_text(example: Dict,tokenizer) -> Dict:
     """
     Convert a single conversation to ChatML format.
     
@@ -75,6 +76,7 @@ def convert_conversation_to_text(example: Dict) -> Dict:
         messages = example["messages"]
     elif "conversations" in example:
         messages = example["conversations"]
+    new_message = []
     for message in messages:
         if 'role' in message:
             role = message['role']
@@ -91,15 +93,18 @@ def convert_conversation_to_text(example: Dict) -> Dict:
             role = 'user'
         elif role == 'gpt':
             role = 'assistant'
-        result.extend([
-            f"<|im_start|>{role}\n",
-            f"{content}",
-            "<|im_end|>"
-        ])
-    
-    return {'text': "".join(result)}
+        new_message.append({'role': role, 'content': content})
+        # result.extend([
+        #     f"<|im_start|>{role}\n",
+        #     f"{content}",
+        #     "<|im_end|>"
+        # ])
+    if len(new_message) == 0:
+        return {'text': ""}
+    return {'text': tokenizer.apply_chat_template(new_message, tokenize=False)}
+    # return {'text': "".join(result)}
 
-def convert_conversational_ds_to_text(ds: datasets.Dataset) -> datasets.Dataset:
+def convert_conversational_ds_to_text(ds: datasets.Dataset,tokenizer) -> datasets.Dataset:
     """
     Convert a conversational dataset to ChatML format.
     
@@ -109,14 +114,16 @@ def convert_conversational_ds_to_text(ds: datasets.Dataset) -> datasets.Dataset:
     Returns:
         A dataset with a single 'text' key containing the ChatML formatted conversation
     """
-    return ds.map(convert_conversation_to_text,num_proc=8,  # 使用8个进程并行处理
+    
+    return ds.map(partial(convert_conversation_to_text,tokenizer=tokenizer),  # 使用convert_conversation_to_text函数处理 
+                  num_proc=8,  # 使用8个进程并行处理
         remove_columns=ds.column_names,  # 移除所有原始列
         desc="Converting conversations"  # 显示进度条描述
     )
 
 
 
-def load_datasets_from_directories(directories):
+def load_datasets_from_directories(directories,tokenizer):
     """
     Load datasets from directories.
     Args:
@@ -136,7 +143,7 @@ def load_datasets_from_directories(directories):
         feature_type = check_feature(ds)
         feature_types.append(feature_type)
         if feature_type == 'conversation':
-            ds = convert_conversational_ds_to_text(ds)
+            ds = convert_conversational_ds_to_text(ds,tokenizer)
         else:
             ds = ds.select_columns(['text'])
         # print(f"Loaded dataset from directory: {directory}")
@@ -154,7 +161,7 @@ class StreamingCLMDataCollator:
         max_length: Maximum sequence length
         pad_to_multiple_of: Optional length to pad sequences to a multiple of
     """
-    tokenizer: PreTrainedTokenizer
+    tokenizer: AutoTokenizer
     max_length: int
     pad_to_multiple_of: Optional[int] = None
     
@@ -292,7 +299,7 @@ class TypedDataset(Dataset):
 
 @dataclass
 class TypedStreamingCLMDataCollator:
-    tokenizer: PreTrainedTokenizer
+    tokenizer: AutoTokenizer
     max_length: int
     min_length: int
     typed_dataset: TypedDataset
@@ -382,8 +389,9 @@ if __name__ == '__main__':
     # print(check_feature(dataset))
     # print(dataset[0]['text'])
     directories = ['/home/yueyulin/data/Magpie-Qwen2.5-Pro-1M-v0.1/data','/home/yueyulin/data/finemath/finemath-4plus/', '/home/yueyulin/data/Mobius/standard/']
-    
-    all_ds,feature_types = load_datasets_from_directories(directories)
+    model_path = '/home/yueyulin/models/DeepSeek-R1-Distill-Qwen-7B/'
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    all_ds,feature_types = load_datasets_from_directories(directories,tokenizer)
     print(all_ds)
     for ds,feature_type in zip(all_ds,feature_types):
         print(f"Feature type: {feature_type}")
@@ -393,7 +401,6 @@ if __name__ == '__main__':
     typed_dataset = TypedDataset(all_ds, feature_types)
     print(typed_dataset)
     print(typed_dataset[0]['text'])
-    model_path = '/home/yueyulin/model/qwen_7b_stage3_4k_splits/'
     from transformers import DataCollatorForLanguageModeling,AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     data_collator = StreamingCLMDataCollator(tokenizer=tokenizer, max_length=4096)

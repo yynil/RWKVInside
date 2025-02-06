@@ -181,6 +181,16 @@ class ScriptArguments:
         default=False,
         metadata={"help": "Use gradient checkpointing"}
     )
+    
+    chunk_size : int = field(
+        default=1024,
+        metadata={"help": "chunk size"}
+    )
+    
+    batch_chunk_size: int = field(
+        default=2,
+        metadata={"help": "batch chunk size"}
+    )
 
 def setup_logging(local_rank):
     """Configure logging"""
@@ -375,7 +385,9 @@ def main():
         beta=args.beta,
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
-        local_rank=args.local_rank
+        local_rank=args.local_rank,
+        chunk_size=args.chunk_size,
+        batch_chunk_size=args.batch_chunk_size
     )
     trainer = GRPOTrainer(
         model_engine,

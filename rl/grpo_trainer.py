@@ -90,6 +90,8 @@ class GRPOConfig:
     warmup_steps: int = 100
     gradient_accumulation_steps: int = 1
     local_rank: int = -1
+    chunk_size: int = 1024
+    batch_chunk_size: int = 2
 
 class GRPOTrainer:
     def __init__(
@@ -199,7 +201,7 @@ class GRPOTrainer:
         # token_kl = (torch.exp(ref_log_probs - model_log_probs) - \
         #           (ref_log_probs - model_log_probs) - 1).sum(dim=-1)
         logger.debug(f"INPUTIDS shape: {generations.shape}")
-        token_kl = self._compute_per_token_kl_chunked(self.model_engine,self.ref_model_engine,generations,chunk_size=1024,chunk_batch=chunk_batch)
+        token_kl = self._compute_per_token_kl_chunked(self.model_engine,self.ref_model_engine,generations,chunk_size=self.args.chunk_size,chunk_batch=chunk_batch)
         logger.debug(f"Token KL shape: {token_kl.shape}")
        # Create completion mask
         batch_size,seq_length = generations.shape[:2]
@@ -242,7 +244,7 @@ class GRPOTrainer:
             logger.debug(f"Completions: {completions}")
             
             # Compute KL divergence
-            token_kl, completion_mask,mean_kl = self._compute_kl_divergence(generations, prompt_length)
+            token_kl, completion_mask,mean_kl = self._compute_kl_divergence(generations, prompt_length, chunk_batch=self.args.batch_chunk_size)
 
             # Calculate rewards
             rewards = self.reward_function(

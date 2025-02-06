@@ -2,7 +2,6 @@ from calendar import c
 from multiprocessing import process
 from multiprocessing.util import is_abstract_socket_namespace
 import os
-from httpx import post
 from regex import T
 import torch
 import torch.distributed as dist

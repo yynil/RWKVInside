@@ -188,8 +188,14 @@ class GRPOTrainer:
                 torch.cuda.empty_cache()
                 model_log_probs = self._chunked_log_softmax(model_logits, chunk_size=chunk_size)
                 ref_log_probs = self._chunked_log_softmax(ref_logits, chunk_size=chunk_size)
-                token_kl = (torch.exp(ref_log_probs - model_log_probs) - \
-                  (ref_log_probs - model_log_probs) - 1).sum(dim=-1)
+                torch.cuda.empty_cache()
+                token_kl = torch.empty_like(model_log_probs)
+                for j in range(0, model_log_probs.shape[-1], chunk_size):
+                    model_chunk = model_log_probs[..., j:j+chunk_size]
+                    ref_chunk = ref_log_probs[..., j:j+chunk_size]
+                    token_kl[..., j:j+chunk_size] = (torch.exp(ref_chunk - model_chunk) - \
+                        (ref_chunk - model_chunk) - 1).sum(dim=-1)
+                torch.cuda.empty_cache()
                 all_token_kl.append(token_kl)
         return torch.cat(all_token_kl, dim=0)
     @time_function
@@ -222,6 +228,8 @@ class GRPOTrainer:
         self.model_engine.train()
         
         try:
+            if self.args.local_rank == 0:
+                logging.info(f"Step {self.count}")
             # Process input batch
             prompts = batch["prompt"]
             logger.debug(f"Prompts: {prompts}")
@@ -237,15 +245,19 @@ class GRPOTrainer:
             ).to(self.model_engine.device)
 
             # Generate completions
+            if self.args.local_rank == 0:
+                logging.info("start to generate completions")
             generations = self._generate_completions(prompt_inputs)
             prompt_length = prompt_inputs["input_ids"].size(1)
             completion_ids = generations[:, prompt_length:]
             completions = self.tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
             logger.debug(f"Completions: {completions}")
-            
+            if self.args.local_rank == 0:
+                logging.info(f"Start to compute KL divergence")
             # Compute KL divergence
             token_kl, completion_mask,mean_kl = self._compute_kl_divergence(generations, prompt_length, chunk_batch=self.args.batch_chunk_size)
-
+            if self.args.local_rank == 0:
+                logging.info(f"Start to compute rewards and loss")
             # Calculate rewards
             rewards = self.reward_function(
                 self.preprocess_reward_inputs(prompts, completions, batch)
@@ -265,6 +277,8 @@ class GRPOTrainer:
             if self.count % self.args.logging_steps == 0:
                 log_samples(prompts[0], batch["ground_truth"][0], completions, rewards, self.count, self.args.num_generations, self.args.local_rank)
             average_generation_length = completion_mask.sum(dim=1).float().mean()
+            if self.args.local_rank == 0:
+                logging.info("Finish training step")
             return loss,rewards.mean(),rewards.std(),mean_kl,average_generation_length
             
         except Exception as e:

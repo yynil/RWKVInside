@@ -1,3 +1,4 @@
+from calendar import c
 from multiprocessing import process
 from multiprocessing.util import is_abstract_socket_namespace
 import os
@@ -19,6 +20,7 @@ from grpo_trainer import GRPOTrainer, GRPOConfig, ConversationDataCollator
 from deepspeed.utils.zero_to_fp32 import convert_zero_checkpoint_to_fp32_state_dict
 from functools import partial
 from profiler import timer
+from utilities import compare_latex_numbers
 def preprocess_reward_inputs(prompts: list, completions: list, inputs: list):
     """Default preprocessing for reward inputs.
     
@@ -65,18 +67,9 @@ def reward_function(inputs):
         reward = 0
         
         # Check for thinking structure
-        index = completion.find("thinking\n")
+        index = completion.find("<think>")
         if index != -1:
-            next_index = completion.find("thinking ends\n")
-            if next_index != -1:
-                reward += 0.2
-            else:
-                reward += 0.1
-                
-        # Check for answer structure
-        index = completion.find("answer\n")
-        if index != -1:
-            next_index = completion.find("answer ends\n")
+            next_index = completion.find("</think>")
             if next_index != -1:
                 reward += 0.2
             else:
@@ -89,13 +82,8 @@ def reward_function(inputs):
             if index_of_boxed != -1:
                 next_index_of_boxed = completion.find("}", index_of_boxed)
                 boxed_ground_truth = completion[index_of_boxed+len("\\boxed{"):next_index_of_boxed]
-                #convert the boxed ground truth to a number
-                try:
-                    value_boxed_ground_truth = float(boxed_ground_truth)
-                    if abs(value_ground_truth - value_boxed_ground_truth) < 1e-6:
-                        reward += 0.6
-                except ValueError:
-                    pass
+                if compare_latex_numbers(boxed_ground_truth,ground_truth):
+                    reward += 0.6
         else:    
             boxed_ground_truth = f'\\boxed{{{ground_truth}}}'
             if boxed_ground_truth in completion:
@@ -167,7 +155,7 @@ class ScriptArguments:
         metadata={"help": "KL divergence weight"}
     )
     logging_steps: int = field(
-        default=100,
+        default=10,
         metadata={"help": "Number of steps between logging"}
     )
     save_steps: int = field(
@@ -254,8 +242,7 @@ def main():
     if is_main_process:
         logger.info(f"Loading tokenizer from {args.model_name}")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+
     
     # Load dataset
     if is_main_process:
@@ -399,37 +386,62 @@ def main():
         reward_function,
         preprocess_reward_inputs=preprocess_reward_inputs
     )
+    total_loss = 0
+    total_reward_mean = 0 
+    total_reward_std = 0
+    total_steps = 0
     if is_main_process:
         from tqdm import tqdm
         pbar = tqdm(total=len(dataloader))
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            config=vars(args)
+        )
     for epoch in range(args.num_epochs):
         if is_main_process:
             logger.info(f"Epoch {epoch} starts training")
         for batch_idx,batch in enumerate(dataloader):
-            loss,reward_mean,reward_std,mean_kl = trainer.train_step(batch)
+            loss,reward_mean,reward_std,mean_kl,average_generation_length = trainer.train_step(batch)
             model_engine.backward(loss)
             model_engine.step()
+            # 累计统计
             if is_main_process:
+                total_loss += loss.item()
+                total_reward_mean += reward_mean.item()
+                total_reward_std += reward_std.item()
+                total_steps += 1
+                
+                # 计算平均值
+                avg_loss = total_loss / total_steps
+                avg_reward_mean = total_reward_mean / total_steps
+                avg_reward_std = total_reward_std / total_steps
+                
+                # 记录到wandb
+                wandb.log({
+                    "loss": loss.item(),
+                    "reward_mean": reward_mean.item(),
+                    "reward_std": reward_std.item(),
+                    "kl": mean_kl.item(),
+                    "avg_generation_length": average_generation_length.item(),
+                    "avg_loss": avg_loss,
+                    "avg_reward_mean": avg_reward_mean,
+                    "avg_reward_std": avg_reward_std,
+                    "epoch": epoch,
+                    "step": total_steps
+                })
+                
                 pbar.update(1)
-                pbar.set_postfix({'loss':loss.item(),'reward_mean':reward_mean.item(),'reward_std':reward_std.item(),'kl':mean_kl.item()})
-
-    # # Initialize wandb if main process
-    # if is_main_process and os.getenv("WANDB_MODE") != "disabled":
-    #     wandb.init(project="grpo-training")
-
-    # # Start training
-    # train(trainer, args, dataloader, sampler, device, world_size, is_main_process)
-
-    # # Convert final checkpoint to fp32 if needed
-    # if local_rank <= 0:
-    #     logger.info("Converting final checkpoint to fp32...")
-    #     final_checkpoint = os.path.join(args.output_dir, "final")
-    #     output_state_dict = os.path.join(args.output_dir, "pytorch_model.bin")
-    #     convert_zero_checkpoint_to_fp32_state_dict(final_checkpoint, output_state_dict)
-    #     logger.info(f"Final model saved to {output_state_dict}")
-
-    # # Cleanup
-    # trainer.destroy()
+                pbar.set_postfix({
+                    'loss': loss.item(),
+                    'avg_loss': avg_loss,
+                    'reward_mean': reward_mean.item(),
+                    'avg_reward': avg_reward_mean,
+                    'kl': mean_kl.item()
+                })
+    # 训练结束后关闭wandb
+    if is_main_process:
+        wandb.finish()
 
 if __name__ == "__main__":
     main()

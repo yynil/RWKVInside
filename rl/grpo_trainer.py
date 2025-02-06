@@ -1,5 +1,8 @@
 import os
 from pyexpat import model
+import tokenize
+from tracemalloc import stop
+from numpy import pad
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -17,6 +20,12 @@ import json
 import logging
 import traceback
 from profiler import time_function
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()  # Default to INFO if not set
+logging.basicConfig(level=getattr(logging, log_level, logging.INFO),
+                    format="%(asctime)s [PID:%(process)d] [TID:%(thread)d] %(levelname)s - %(message)s",
+                    datefmt="%Y-%m-%d %H:%M:%S.%f")
+
+logger = logging.getLogger(__name__)
 
 @time_function
 def log_samples(prompt, ground_truth, completion, reward, step, num_generations, local_rank):
@@ -104,54 +113,105 @@ class GRPOTrainer:
             do_sample=True,
             temperature=self.args.temperature,
             num_return_sequences=self.args.num_generations,
-            pad_token_id=self.tokenizer.pad_token_id,
-            use_cache=True
+            use_cache=True,
+            tokenizer=self.tokenizer,
+            stop_strings=[self.tokenizer.eos_token],
+            pad_token_id=self.tokenizer.pad_token_id
         )
+        print(f'tokenizer {self.tokenizer},stop_strings {self.tokenizer.eos_token},pad_token_id {self.tokenizer.pad_token_id}')
         self.preprocess_reward_inputs = preprocess_reward_inputs
         self.count = 0
     @time_function
     def _generate_completions(self, prompt_inputs):
         """Generate completions efficiently with DeepSpeed Engine."""
-        self.model_engine.eval()
-        with torch.no_grad():
+        with deepspeed.zero.unwrap_model_for_generation(self.model_engine):
             generations = self.model_engine.module.generate(
                 input_ids=prompt_inputs["input_ids"],
                 attention_mask=prompt_inputs.get("attention_mask"),
                 generation_config=self.generation_config,
-                synced_gpus=True
+                synced_gpus=True,
+                tokenizer=self.tokenizer
             )
-        self.model_engine.train()
         return generations
     @time_function
-    def _compute_per_token_logps(self, model_engine, input_ids):
-        """Compute per-token log probabilities for a model."""
-        with torch.no_grad():
-            logits = model_engine(input_ids).logits[:, :-1, :]
-            
-        shift_labels = input_ids[:, 1:]
-        log_probs = torch.log_softmax(logits, dim=-1)
-        token_log_probs = torch.gather(
-            log_probs,
-            dim=-1,
-            index=shift_labels.unsqueeze(-1)
-        ).squeeze(-1)
+    def _chunked_log_softmax(self,logits, chunk_size=1024):
+        """
+        Compute log_softmax in a memory-efficient way by chunking along the last dimension.
         
-        return token_log_probs
+        Args:
+            logits (Tensor): The input logits of shape (B, T, Vocab_size).
+            chunk_size (int): The size of chunks to split the last dimension.
+        
+        Returns:
+            Tensor: Log-softmax computed over the last dimension.
+        """
+        logger.debug(f"Logits shape: {logits.shape}")
+        max_logits = torch.max(logits, dim=-1, keepdim=True)[0]  # 防止溢出的最大值
+        log_probs = torch.empty_like(logits)  # 预分配 log_probs 避免内存重复分配
+        
+        sum_exp_logits = torch.zeros_like(max_logits)
+        for i in range(0, logits.shape[-1], chunk_size):
+            chunk = logits[..., i:i+chunk_size] - max_logits
+            exp_chunk = torch.exp(chunk)
+            sum_exp_logits += torch.sum(exp_chunk, dim=-1, keepdim=True)
+        
+        log_sum_exp = torch.log(sum_exp_logits)
+        for i in range(0, logits.shape[-1], chunk_size):
+            log_probs[..., i:i+chunk_size] = logits[..., i:i+chunk_size] - max_logits - log_sum_exp
+        
+        return log_probs
+
     @time_function
-    def _compute_kl_divergence(self, generations, prompt_length):
+    def _compute_per_token_logps_chunked(self, model_engine, input_ids, chunk_size=1024, chunk_batch=2):
+        """Compute per-token log probabilities with reduced memory usage."""
+        """Compute per-token log probabilities with reduced memory usage."""
+        with torch.no_grad():
+            all_log_probs = []
+            for i in range(0, input_ids.size(0), chunk_batch):
+                batch_input_ids = input_ids[i:i+chunk_batch]
+                logits = model_engine(batch_input_ids).logits[:, :-1, :]
+                log_probs = self._chunked_log_softmax(logits, chunk_size=chunk_size)
+                all_log_probs.append(log_probs)
+        return torch.cat(all_log_probs, dim=0)
+    
+    def _compute_per_token_kl_chunked(self,model_engine,ref_engine,input_ids,chunk_batch=2,chunk_size=1024):
+        """Compute per-token KL divergence between model and reference model distributions."""
+        with torch.no_grad():
+            all_token_kl = []
+            for i in range(0,input_ids.size(0),chunk_batch):
+                batch_input_ids = input_ids[i:i+chunk_batch]
+                model_logits = model_engine(batch_input_ids).logits[:, :-1, :]
+                torch.cuda.empty_cache()
+                ref_logits = ref_engine(batch_input_ids).logits[:, :-1, :]
+                torch.cuda.empty_cache()
+                model_log_probs = self._chunked_log_softmax(model_logits, chunk_size=chunk_size)
+                ref_log_probs = self._chunked_log_softmax(ref_logits, chunk_size=chunk_size)
+                token_kl = (torch.exp(ref_log_probs - model_log_probs) - \
+                  (ref_log_probs - model_log_probs) - 1).sum(dim=-1)
+                all_token_kl.append(token_kl)
+        return torch.cat(all_token_kl, dim=0)
+    @time_function
+    def _compute_kl_divergence(self, generations, prompt_length, chunk_batch=2):
         """Compute KL divergence between model and reference model distributions."""
-        model_log_probs = self._compute_per_token_logps(self.model_engine, generations)
-        ref_log_probs = self._compute_per_token_logps(self.ref_model_engine, generations)
+        # model_log_probs = self._compute_per_token_logps_chunked(self.model_engine, generations)
+        # ref_log_probs = self._compute_per_token_logps_chunked(self.ref_model_engine, generations)
         
-        token_kl = torch.exp(ref_log_probs - model_log_probs) - \
-                  (ref_log_probs - model_log_probs) - 1
-                  
-        # Create completion mask
-        completion_mask = torch.arange(
-            model_log_probs.size(1),
-            device=generations.device
-        )[None, :] >= (prompt_length - 1)
-        completion_mask = completion_mask.expand(generations.size(0), -1)
+        # token_kl = (torch.exp(ref_log_probs - model_log_probs) - \
+        #           (ref_log_probs - model_log_probs) - 1).sum(dim=-1)
+        logger.debug(f"INPUTIDS shape: {generations.shape}")
+        token_kl = self._compute_per_token_kl_chunked(self.model_engine,self.ref_model_engine,generations,chunk_size=1024,chunk_batch=chunk_batch)
+        logger.debug(f"Token KL shape: {token_kl.shape}")
+       # Create completion mask
+        batch_size,seq_length = generations.shape[:2]
+        completion_mask = torch.arange(seq_length, device=generations.device)[None, :] >= (prompt_length - 1)
+        logger.debug(f"Completion mask shape: {completion_mask.shape}")
+        # Mask out pad tokens
+        pad_mask = generations[:, 1:] != self.tokenizer.pad_token_id  # Shift to match log_probs dimension
+        logger.debug(f"Pad mask shape: {pad_mask.shape}")
+        completion_mask = completion_mask[:, 1:] & pad_mask  # Ensure matching shape
+        logger.debug(f"Completion mask shape: {completion_mask.shape}")
+        # completion_mask = completion_mask.expand(generations.size(0), -1)
+        logger.debug(f"Token KL shape: {token_kl.shape}")
         mean_kl = ((token_kl * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
         return token_kl, completion_mask,mean_kl
     @time_function
@@ -162,8 +222,9 @@ class GRPOTrainer:
         try:
             # Process input batch
             prompts = batch["prompt"]
+            logger.debug(f"Prompts: {prompts}")
             prompts = [self.tokenizer.apply_chat_template(p, tokenize=False, add_generation_prompt=True) for p in prompts]
-            
+            logger.debug(f"Processed prompts: {prompts}")
             # Tokenize
             prompt_inputs = self.tokenizer(
                 prompts,
@@ -178,7 +239,8 @@ class GRPOTrainer:
             prompt_length = prompt_inputs["input_ids"].size(1)
             completion_ids = generations[:, prompt_length:]
             completions = self.tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
-
+            logger.debug(f"Completions: {completions}")
+            
             # Compute KL divergence
             token_kl, completion_mask,mean_kl = self._compute_kl_divergence(generations, prompt_length)
 
@@ -200,7 +262,8 @@ class GRPOTrainer:
             self.count += 1
             if self.count % self.args.logging_steps == 0:
                 log_samples(prompts[0], batch["ground_truth"][0], completions, rewards, self.count, self.args.num_generations, self.args.local_rank)
-            return loss,rewards.mean(),rewards.std(),mean_kl
+            average_generation_length = completion_mask.sum(dim=1).float().mean()
+            return loss,rewards.mean(),rewards.std(),mean_kl,average_generation_length
             
         except Exception as e:
             logging.error(f"Error in train_step:")

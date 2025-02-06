@@ -184,19 +184,23 @@ class GRPOTrainer:
                 batch_input_ids = input_ids[i:i+chunk_batch]
                 model_logits = model_engine(batch_input_ids).logits[:, :-1, :]
                 torch.cuda.empty_cache()
-                ref_logits = ref_engine(batch_input_ids).logits[:, :-1, :]
+                ref_logits = ref_engine(batch_input_ids).logits[:, :-1, :]  
                 torch.cuda.empty_cache()
                 model_log_probs = self._chunked_log_softmax(model_logits, chunk_size=chunk_size)
                 ref_log_probs = self._chunked_log_softmax(ref_logits, chunk_size=chunk_size)
+                torch.cuda.empty_cache() 
+                B,T,V = model_log_probs.shape
+                chunked_token_kl = torch.empty(B,T,device=model_log_probs.device,dtype=model_log_probs.dtype)
+                for j in range(0,T,chunk_size):
+                    model_chunk = model_log_probs[:,j:j+chunk_size,:]
+                    ref_chunk = ref_log_probs[:,j:j+chunk_size,:]
+                    token_kl = (torch.exp(ref_chunk - model_chunk) - (ref_chunk - model_chunk) - 1).sum(dim=-1)#B,chunk_size
+                    chunked_token_kl[:,j:j+chunk_size] = token_kl
+                # token_kl = torch.cat(chunked_token_kl,dim=1).sum(dim=-1)
+                # token_kl = (torch.exp(ref_log_probs - model_log_probs) - (ref_log_probs - model_log_probs) - 1).sum(dim=-1)
                 torch.cuda.empty_cache()
-                token_kl = torch.empty_like(model_log_probs)
-                for j in range(0, model_log_probs.shape[-1], chunk_size):
-                    model_chunk = model_log_probs[..., j:j+chunk_size]
-                    ref_chunk = ref_log_probs[..., j:j+chunk_size]
-                    token_kl[..., j:j+chunk_size] = (torch.exp(ref_chunk - model_chunk) - \
-                        (ref_chunk - model_chunk) - 1).sum(dim=-1)
-                torch.cuda.empty_cache()
-                all_token_kl.append(token_kl)
+                # all_token_kl.append(token_kl)
+                all_token_kl.append(chunked_token_kl)
         return torch.cat(all_token_kl, dim=0)
     @time_function
     def _compute_kl_divergence(self, generations, prompt_length, chunk_batch=2):

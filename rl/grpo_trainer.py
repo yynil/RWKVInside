@@ -92,6 +92,7 @@ class GRPOConfig:
     local_rank: int = -1
     chunk_size: int = 1024
     batch_chunk_size: int = 2
+    ds_stage : int = 3
 
 class GRPOTrainer:
     def __init__(
@@ -126,7 +127,16 @@ class GRPOTrainer:
     @time_function
     def _generate_completions(self, prompt_inputs):
         """Generate completions efficiently with DeepSpeed Engine."""
-        with deepspeed.zero.unwrap_model_for_generation(self.model_engine):
+        if self.args.ds_stage == 3:
+            with deepspeed.zero.unwrap_model_for_generation(self.model_engine):
+                generations = self.model_engine.module.generate(
+                    input_ids=prompt_inputs["input_ids"],
+                    attention_mask=prompt_inputs.get("attention_mask"),
+                    generation_config=self.generation_config,
+                    synced_gpus=True,
+                    tokenizer=self.tokenizer
+                )
+        else:
             generations = self.model_engine.module.generate(
                 input_ids=prompt_inputs["input_ids"],
                 attention_mask=prompt_inputs.get("attention_mask"),

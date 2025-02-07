@@ -193,6 +193,11 @@ class ScriptArguments:
         default=2,
         metadata={"help": "batch chunk size"}
     )
+    
+    ds_stage: int = field(
+        default=3,
+        metadata={"help": "DeepSpeed stage"}
+    )
 
 def setup_logging(local_rank):
     """Configure logging"""
@@ -320,7 +325,7 @@ def main():
                     "enabled": True
                 },
                 "zero_optimization": {
-                    "stage": 3,
+                    "stage": args.ds_stage,
                     "stage3_max_live_parameters": 1e9,
                     "stage3_max_reuse_distance": 1e9,
                     "stage3_prefetch_bucket_size": 5e6,
@@ -380,7 +385,11 @@ def main():
     for param in ref_model.parameters():
         param.requires_grad = False
     ref_ds_config = ds_config.copy()
-    del ref_ds_config["zero_optimization"]["offload_optimizer"] 
+    if args.ds_stage == 3:
+        del ref_ds_config["zero_optimization"]["offload_optimizer"] 
+    elif args.ds_stage == 2:
+        # 对参考模型禁用 ZeRO 优化
+        ref_ds_config["zero_optimization"]["stage"] = 0
     ref_model_engine, _, _, _ = deepspeed.initialize(
             model=ref_model,
             config=ref_ds_config
@@ -409,7 +418,8 @@ def main():
         save_steps=args.save_steps,
         local_rank=args.local_rank,
         chunk_size=args.chunk_size,
-        batch_chunk_size=args.batch_chunk_size
+        batch_chunk_size=args.batch_chunk_size,
+        ds_stage=args.ds_stage
     )
     trainer = GRPOTrainer(
         model_engine,
@@ -431,6 +441,10 @@ def main():
             name=args.wandb_run_name,
             config=vars(args)
         )
+    #delete the output_dir if it exists
+    if os.path.exists(args.output_dir):
+        os.rmdir(args.output_dir)
+        
     for epoch in range(args.num_epochs):
         if is_main_process:
             logger.info(f"Epoch {epoch} starts training")
@@ -442,7 +456,7 @@ def main():
             loss,reward_mean,reward_std,mean_kl,average_generation_length = trainer.train_step(batch)
             model_engine.backward(loss)
             model_engine.step()
-            if batch_idx % args.save_steps == 0:
+            if batch_idx % args.save_steps == 0 and batch_idx > 0:
                 save_checkpoint(model_engine, args.output_dir, epoch, batch_idx,logger)
             # 累计统计
             if is_main_process:

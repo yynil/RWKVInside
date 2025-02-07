@@ -199,6 +199,15 @@ class ScriptArguments:
         metadata={"help": "DeepSpeed stage"}
     )
 
+    ds_param_offload : bool = field(
+        default=True,
+        metadata={"help": "DeepSpeed parameter offload"}
+    )
+    
+    ds_optimizer_offload : bool = field(
+        default=True,
+        metadata={"help": "DeepSpeed optimizer offload"}
+    )
 def setup_logging(local_rank):
     """Configure logging"""
     if local_rank <= 0:
@@ -225,8 +234,12 @@ def configure_optimizer(model, args):
     
     optim_groups = [{"params": [param_dict[n] for n in lr_1x], "weight_decay": 0.0, "my_lr_scale": 1.0}]
 
-    from deepspeed.ops.adam import DeepSpeedCPUAdam
-    optimizer = DeepSpeedCPUAdam(optim_groups, lr=args.learning_rate, betas=(0.9, 0.999),  bias_correction=True, adamw_mode=True, amsgrad=False)
+    if args.ds_optimizer_offload:
+        from deepspeed.ops.adam import DeepSpeedCPUAdam
+        optimizer = DeepSpeedCPUAdam(optim_groups, lr=args.learning_rate, betas=(0.9, 0.999),  bias_correction=True, adamw_mode=True, amsgrad=False)
+    else:
+        from deepspeed.ops.adam import FusedAdam
+        optimizer = FusedAdam(optim_groups, lr=args.learning_rate, betas=(0.9, 0.999), eps=1e-8, bias_correction=True, adam_w_mode=True, amsgrad=False)
   
     return optimizer
 
@@ -366,9 +379,14 @@ def main():
         logger.info(f'start configuring optimizer')
     optimizer = configure_optimizer(model, args)
     # Initialize DeepSpeed for main model
+    model_ds_config = ds_config.copy()
+    if not args.ds_param_offload:
+        del model_ds_config["zero_optimization"]["offload_param"]
+    if not args.ds_optimizer_offload:
+        del model_ds_config["zero_optimization"]["offload_optimizer"]
     model_engine, optimizer, _, scheduler = deepspeed.initialize(
             model=model,
-            config=ds_config,
+            config=model_ds_config,
             model_parameters=model.parameters(),
             optimizer=optimizer
     )

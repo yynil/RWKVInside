@@ -20,6 +20,8 @@ from deepspeed.utils.zero_to_fp32 import convert_zero_checkpoint_to_fp32_state_d
 from functools import partial
 from profiler import timer
 from utilities import compare_latex_numbers
+import time  # 添加这一行
+
 def preprocess_reward_inputs(prompts: list, completions: list, inputs: list):
     """Default preprocessing for reward inputs.
     
@@ -412,6 +414,10 @@ def main():
     for epoch in range(args.num_epochs):
         if is_main_process:
             logger.info(f"Epoch {epoch} starts training")
+        # 使用时间戳生成随机种子
+        time_seed = int(time.time() * 1000) & 0xffffffff  # 获取毫秒级时间戳并转换为32位整数
+        sampler.set_epoch(time_seed)  # 使用时间戳作为种子
+        
         for batch_idx,batch in enumerate(dataloader):
             loss,reward_mean,reward_std,mean_kl,average_generation_length = trainer.train_step(batch)
             model_engine.backward(loss)

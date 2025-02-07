@@ -405,7 +405,7 @@ def main():
     ref_ds_config = ds_config.copy()
     if args.ds_stage == 3:
         del ref_ds_config["zero_optimization"]["offload_optimizer"] 
-    elif args.ds_stage == 2:
+    else:
         # 对参考模型禁用 ZeRO 优化
         ref_ds_config["zero_optimization"]["stage"] = 0
     ref_model_engine, _, _, _ = deepspeed.initialize(

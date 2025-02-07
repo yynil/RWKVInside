@@ -225,6 +225,26 @@ def configure_optimizer(model, args):
   
     return optimizer
 
+def save_checkpoint(model_engine, output_dir, epoch, step,logger):
+    """Save model checkpoint"""
+    if os.path.exists(output_dir):
+        if model_engine.local_rank == 0:
+            checkpoints = os.listdir(output_dir)
+            #only list the directories   
+            checkpoints = [f for f in checkpoints if os.path.isdir(os.path.join(output_dir, f))]
+            #sort by creation time  
+            checkpoints.sort(key=lambda x: os.path.getctime(os.path.join(output_dir, x)))
+            if len(checkpoints) > 2:
+                print(f'deleting older checkpoints {checkpoints[0]}')
+                import shutil
+                shutil.rmtree(os.path.join(output_dir, checkpoints[0]))    
+    output_dir = f"{output_dir}/epoch_{epoch}_step_{step}"
+    print(f'saving checkpoint to {output_dir}')
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    model_engine.save_checkpoint(output_dir)
+
 def main():
     # Parse arguments
     parser = HfArgumentParser(ScriptArguments)
@@ -422,6 +442,8 @@ def main():
             loss,reward_mean,reward_std,mean_kl,average_generation_length = trainer.train_step(batch)
             model_engine.backward(loss)
             model_engine.step()
+            if batch_idx % args.save_steps == 0:
+                save_checkpoint(model_engine, args.output_dir, epoch, batch_idx,logger)
             # 累计统计
             if is_main_process:
                 total_loss += loss.item()
@@ -456,6 +478,12 @@ def main():
                     'avg_reward': avg_reward_mean,
                     'kl': mean_kl.item()
                 })
+        #save checkpoint at the end of each epoch
+        epoch_checkpoint_dir = f"{args.output_dir}/epoch_{epoch}"
+        if not os.path.exists(epoch_checkpoint_dir):
+            os.makedirs(epoch_checkpoint_dir)
+        print(f'saving checkpoint to {epoch_checkpoint_dir}')
+        model_engine.save_checkpoint(epoch_checkpoint_dir)
     # 训练结束后关闭wandb
     if is_main_process:
         wandb.finish()

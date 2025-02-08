@@ -475,7 +475,8 @@ def main():
             model_engine.backward(loss)
             model_engine.step()
             if batch_idx % args.save_steps == 0 and batch_idx > 0:
-                save_checkpoint(model_engine, args.output_dir, epoch, batch_idx,logger)
+                if (args.ds_stage != 3 and is_main_process) or (args.ds_stage == 3):
+                    save_checkpoint(model_engine, args.output_dir, epoch, batch_idx,logger)
             # 累计统计
             if is_main_process:
                 total_loss += loss.item()
@@ -511,11 +512,12 @@ def main():
                     'kl': mean_kl.item()
                 })
         #save checkpoint at the end of each epoch
-        epoch_checkpoint_dir = f"{args.output_dir}/epoch_{epoch}"
-        if not os.path.exists(epoch_checkpoint_dir):
-            os.makedirs(epoch_checkpoint_dir)
-        print(f'saving checkpoint to {epoch_checkpoint_dir}')
-        model_engine.save_checkpoint(epoch_checkpoint_dir)
+        if (args.ds_stage != 3 and is_main_process) or (args.ds_stage == 3):
+            epoch_checkpoint_dir = f"{args.output_dir}/epoch_{epoch}"
+            if not os.path.exists(epoch_checkpoint_dir):
+                os.makedirs(epoch_checkpoint_dir)
+            print(f'saving checkpoint to {epoch_checkpoint_dir}')
+            model_engine.save_checkpoint(epoch_checkpoint_dir)
     # 训练结束后关闭wandb
     if is_main_process:
         wandb.finish()

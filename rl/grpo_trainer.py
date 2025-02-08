@@ -351,9 +351,9 @@ class GRPOTrainer:
             importance_weights_clipped = torch.clamp(importance_weights, 1 - epsilon, 1 + epsilon)
             # Calculate the GRPO loss using the minimum of the clipped and unclipped importance weights
             batch_size,seq_length = generations.shape[:2]
-            completion_mask = torch.arange(seq_length, device=generations.device)[None, :] >= (prompt_length - 1)
-            pad_mask = generations[:, 1:] != self.tokenizer.pad_token_id  # Shift to match log_probs dimension
-            completion_mask = completion_mask[:, 1:] & pad_mask  # Ensure matching shape
+            completion_mask = torch.arange(logits_to_keep, device=generations.device)[None, :] >= 0
+            pad_mask = completion_ids != self.tokenizer.pad_token_id  # Shift to match log_probs dimension
+            completion_mask = completion_mask & pad_mask  # Ensure matching shape
             advantages = advantages.unsqueeze(1)
             token_loss = -(torch.min(advantages * importance_weights, advantages * importance_weights_clipped) - self.args.beta * per_token_kl) * completion_mask
             

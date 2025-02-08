@@ -208,6 +208,11 @@ class ScriptArguments:
         default=True,
         metadata={"help": "DeepSpeed optimizer offload"}
     )
+    
+    is_att_tuning_only : bool = field(
+        default=False,
+        metadata={"help": "Attention tuning only"}
+    )
 def setup_logging(local_rank):
     """Configure logging"""
     if local_rank <= 0:
@@ -375,6 +380,12 @@ def main():
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
     model.train()
+    for n,p in model.named_parameters():
+        if args.is_att_tuning_only:
+            if 'self_attn' not in n:
+                p.requires_grad = False
+        else:
+            p.requires_grad = True
     if is_main_process:
         logger.info(f'start configuring optimizer')
     optimizer = configure_optimizer(model, args)

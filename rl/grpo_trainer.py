@@ -5,6 +5,7 @@ from tracemalloc import stop
 from numpy import pad
 import torch
 import torch.nn as nn
+from torch.nn import functional as F
 import torch.distributed as dist
 import deepspeed
 from typing import Optional, Union, Any, Callable
@@ -27,6 +28,20 @@ logging.basicConfig(level=getattr(logging, log_level, logging.INFO),
 
 logger = logging.getLogger(__name__)
 
+#borrow from TRL utility
+def selective_log_softmax(logits, index):
+    if logits.dtype in [torch.float32, torch.float64]:
+        selected_logits = torch.gather(logits, dim=-1, index=index.unsqueeze(-1)).squeeze(-1)
+        logsumexp_values = torch.logsumexp(logits, dim=-1)
+        per_token_logps = selected_logits - logsumexp_values  # log_softmax(x_i) = x_i - logsumexp(x)
+    else:
+        per_token_logps = []
+        for row_logits, row_labels in zip(logits, index):
+            row_logps = F.log_softmax(row_logits, dim=-1)
+            row_per_token_logps = row_logps.gather(dim=-1, index=row_labels.unsqueeze(-1)).squeeze(-1)
+            per_token_logps.append(row_per_token_logps)
+        per_token_logps = torch.stack(per_token_logps)
+    return per_token_logps
 @time_function
 def log_samples(prompt, ground_truth, completion, reward, step, num_generations, local_rank):
     """Log training samples and rewards"""
@@ -129,7 +144,20 @@ class GRPOTrainer:
     def _generate_completions(self, prompt_inputs):
         """Generate completions efficiently with DeepSpeed Engine."""
         if self.args.ds_stage == 3:
-            with deepspeed.zero.unwrap_model_for_generation(self.model_engine):
+            with deepspeed.zero.unwrap_model_for_generation(self.model_engine) as unwrapped_model:
+                unwrapped_model.eval()
+                with torch.no_grad():
+                    generations = unwrapped_model.generate(
+                        input_ids=prompt_inputs["input_ids"],
+                        attention_mask=prompt_inputs.get("attention_mask"),
+                        generation_config=self.generation_config,
+                        synced_gpus=True,
+                        tokenizer=self.tokenizer
+                    )
+                unwrapped_model.train()
+        else:
+            self.model_engine.module.eval()
+            with torch.no_grad():
                 generations = self.model_engine.module.generate(
                     input_ids=prompt_inputs["input_ids"],
                     attention_mask=prompt_inputs.get("attention_mask"),
@@ -137,14 +165,7 @@ class GRPOTrainer:
                     synced_gpus=True,
                     tokenizer=self.tokenizer
                 )
-        else:
-            generations = self.model_engine.module.generate(
-                input_ids=prompt_inputs["input_ids"],
-                attention_mask=prompt_inputs.get("attention_mask"),
-                generation_config=self.generation_config,
-                synced_gpus=True,
-                tokenizer=self.tokenizer
-            )
+            self.model_engine.module.train()
         return generations
     @time_function
     def _chunked_log_softmax(self,logits, chunk_size=1024):
@@ -237,6 +258,21 @@ class GRPOTrainer:
         logger.debug(f"Token KL shape: {token_kl.shape}")
         mean_kl = ((token_kl * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
         return token_kl, completion_mask,mean_kl
+    
+    @time_function
+    def _batch_chunked_forward(self, model, input_ids, chunk_batch=2):
+        """Compute model logits in a memory-efficient way by chunking along the last dimension."""
+        torch.cuda.empty_cache()
+        all_logits = []
+        for i in range(0, input_ids.size(0), chunk_batch):
+            batch_input_ids = input_ids[i:i+chunk_batch]
+            logger.debug(f"Batch {i} forward {batch_input_ids.shape}")
+            logits = model(batch_input_ids).logits
+            logits = logits[:, :-1, :]#chunk_batch,T-1,V exclude the last logit
+            all_logits.append(logits)
+            torch.cuda.empty_cache()
+        return torch.cat(all_logits, dim=0)#B,T-1,V
+    
     @time_function
     def train_step(self, batch):
         """Execute single training step."""
@@ -264,15 +300,10 @@ class GRPOTrainer:
                 logging.info("start to generate completions")
             generations = self._generate_completions(prompt_inputs)
             prompt_length = prompt_inputs["input_ids"].size(1)
-            completion_ids = generations[:, prompt_length:]
+            completion_ids = generations[:, prompt_length:]#B,T
+            logits_to_keep = completion_ids.size(1) #T-promt_length
             completions = self.tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
             logger.debug(f"Completions: {completions}")
-            if self.args.local_rank == 0:
-                logging.info(f"Start to compute KL divergence")
-            # Compute KL divergence
-            token_kl, completion_mask,mean_kl = self._compute_kl_divergence(generations, prompt_length, chunk_batch=self.args.batch_chunk_size)
-            if self.args.local_rank == 0:
-                logging.info(f"Start to compute rewards and loss")
             # Calculate rewards
             rewards = self.reward_function(
                 self.preprocess_reward_inputs(prompts, completions, batch)
@@ -284,17 +315,89 @@ class GRPOTrainer:
             advantages = (rewards_shaped - rewards_shaped.mean(dim=1, keepdim=True)) / \
                         (rewards_shaped.std(dim=1, keepdim=True) + 1e-8)
             advantages = advantages.view(-1)
+            if self.args.local_rank == 0:
+                logging.info(f"Start to compute KL divergence")
+                
+            #rewrite the GRPO loss
+            #calculate ref_logits
+            logger.debug(f'ref_model generations shape {generations.shape}')
+            with torch.no_grad():
+                ref_logits = self._batch_chunked_forward(self.ref_model_engine, generations, chunk_batch=self.args.batch_chunk_size) 
+            ref_logits = ref_logits[:,-logits_to_keep:,:]#B,logits_to_keep,V
+            ref_logps = selective_log_softmax(ref_logits, generations[:,-logits_to_keep:])
+            #calculate model_logits
+            logger.debug(f'model generations shape {generations.shape}')
+            model_logits = self._batch_chunked_forward(self.model_engine, generations, chunk_batch=self.args.batch_chunk_size)
+            model_logits = model_logits[:,-logits_to_keep:,:]#B,logits_to_keep,V        
+            model_logps = selective_log_softmax(model_logits, generations[:,-logits_to_keep:])    
+            log_probs_diff = model_logps - ref_logps
+            exp_log_probs_diff = torch.exp(log_probs_diff)
+            # per_token_kl = (1/exp_log_probs_diff) + log_probs_diff - 1
+            per_token_kl =  exp_log_probs_diff + (-log_probs_diff) - 1 #torch.exp(- log_probs_diff) + log_probs_diff - 1
+            if self.args.local_rank == 0:
+                logging.info(f"Start to compute rewards and loss")
+            
 
             # Compute loss
-            token_loss = -(advantages.unsqueeze(1) - self.args.beta * token_kl) * completion_mask
-            loss = token_loss.sum() / completion_mask.sum()
+            epsilon = 0.2  # You can adjust this hyperparameter
+
+            # Calculate the ratio of probabilities (importance weights)
+            # Assuming you have access to the log probabilities of the current policy (log_pi_theta)
+            # and the log probabilities of the old policy (log_pi_theta_old)
+            # Here I am assuming that token_kl is the kl divergence D(pi_theta || pi_ref), and log_pi_theta_old - log_pi_theta = D(pi_theta || pi_ref)
+            importance_weights =  exp_log_probs_diff #exp(log_pi_theta - log_pi_theta_old) # This needs to be computed
+
+            # Clip the importance weights
+            importance_weights_clipped = torch.clamp(importance_weights, 1 - epsilon, 1 + epsilon)
+            # Calculate the GRPO loss using the minimum of the clipped and unclipped importance weights
+            batch_size,seq_length = generations.shape[:2]
+            completion_mask = torch.arange(seq_length, device=generations.device)[None, :] >= (prompt_length - 1)
+            pad_mask = generations[:, 1:] != self.tokenizer.pad_token_id  # Shift to match log_probs dimension
+            completion_mask = completion_mask[:, 1:] & pad_mask  # Ensure matching shape
+            advantages = advantages.unsqueeze(1)
+            token_loss = -(torch.min(advantages * importance_weights, advantages * importance_weights_clipped) - self.args.beta * per_token_kl) * completion_mask
+            
+            # token_loss = -(advantages.unsqueeze(1) - self.args.beta * token_kl) * completion_mask
+            loss = -token_loss.sum() / completion_mask.sum()
             self.count += 1
             if self.count % self.args.logging_steps == 0:
                 log_samples(prompts[0], batch["ground_truth"][0], completions, rewards, self.count, self.args.num_generations, self.args.local_rank)
             average_generation_length = completion_mask.sum(dim=1).float().mean()
             if self.args.local_rank == 0:
                 logging.info("Finish training step")
-            return loss,rewards.mean(),rewards.std(),mean_kl,average_generation_length
+            return loss,rewards.mean(),rewards.std(),0,average_generation_length
+            
+            # per_token_kl = torch.exp(ref_logps - model_logps) - (ref_logps - model_logps) - 1
+            
+            # Compute KL divergence
+            # token_kl, completion_mask,mean_kl = self._compute_kl_divergence(generations, prompt_length, chunk_batch=self.args.batch_chunk_size)
+            # if self.args.local_rank == 0:
+            #     logging.info(f"Start to compute rewards and loss")
+            
+
+            # # Compute loss
+            # epsilon = 0.2  # You can adjust this hyperparameter
+
+            # # Calculate the ratio of probabilities (importance weights)
+            # # Assuming you have access to the log probabilities of the current policy (log_pi_theta)
+            # # and the log probabilities of the old policy (log_pi_theta_old)
+            # # Here I am assuming that token_kl is the kl divergence D(pi_theta || pi_ref), and log_pi_theta_old - log_pi_theta = D(pi_theta || pi_ref)
+            # importance_weights =  - token_kl #exp(log_pi_theta - log_pi_theta_old) # This needs to be computed
+
+            # # Clip the importance weights
+            # importance_weights_clipped = torch.clamp(importance_weights, 1 - epsilon, 1 + epsilon)
+            #  # Calculate the GRPO loss using the minimum of the clipped and unclipped importance weights
+            # token_loss = -(torch.min(advantages.unsqueeze(1) * importance_weights, advantages.unsqueeze(1) * importance_weights_clipped) - self.args.beta * token_kl) * completion_mask
+            
+            # # token_loss = -(advantages.unsqueeze(1) - self.args.beta * token_kl) * completion_mask
+            # loss = token_loss.sum() / completion_mask.sum()
+            # self.count += 1
+            # if self.count % self.args.logging_steps == 0:
+            #     log_samples(prompts[0], batch["ground_truth"][0], completions, rewards, self.count, self.args.num_generations, self.args.local_rank)
+            # average_generation_length = completion_mask.sum(dim=1).float().mean()
+            # if self.args.local_rank == 0:
+            #     logging.info("Finish training step")
+            # return loss,rewards.mean(),rewards.std(),mean_kl,average_generation_length
             
         except Exception as e:
             logging.error(f"Error in train_step:")

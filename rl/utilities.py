@@ -30,6 +30,9 @@ def parse_latex_to_python(expr):
     # Handle LaTeX fractions (\frac{num}{denom}) => num/denom
     expr = re.sub(r'\\frac{([^{}]+)}{([^{}]+)}', r'(\1)/(\2)', expr)
     
+    # Handle LaTeX fractions (\dfrac{num}{denom}) => num/denom
+    expr = re.sub(r'\\dfrac{([^{}]+)}{([^{}]+)}', r'(\1)/(\2)', expr)
+    
     # Handle square roots (\sqrt{100}) => math.sqrt(100)
     expr = re.sub(r'\\sqrt{([^{}]+)}', r'math.sqrt(\1)', expr)
     
@@ -108,4 +111,12 @@ if __name__ == '__main__':
 
     a = r'$20.00'
     b = '20'
+    print(compare_latex_numbers(a, b))  # True
+    
+    a = r'\dfrac{1}{2}'
+    b = r'0.5'
+    print(compare_latex_numbers(a, b))  # True
+    
+    a = r'\dfrac{1}{2}'
+    b = r'\frac{1}{2}'
     print(compare_latex_numbers(a, b))  # True

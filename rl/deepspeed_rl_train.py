@@ -91,7 +91,7 @@ def reward_function(inputs):
                 reward += 0.6
             
         rewards.append(reward)
-    return torch.tensor(rewards, dtype=torch.float,requires_grad=True)
+    return torch.tensor(rewards, dtype=torch.float)
 @dataclass
 class ScriptArguments:
     """Command line arguments for training script"""
@@ -384,9 +384,13 @@ def main():
         if args.is_att_tuning_only:
             if 'self_attn' not in n:
                 p.requires_grad = False
+            else:
+                p.requires_grad = True
         else:
             p.requires_grad = True
     if is_main_process:
+        for n,p in model.named_parameters():
+            print(f'{n} requires grad: {p.requires_grad}')
         logger.info(f'start configuring optimizer')
     optimizer = configure_optimizer(model, args)
     # Initialize DeepSpeed for main model
@@ -424,6 +428,19 @@ def main():
             config=ref_ds_config
     )
     del ref_model
+    #prepare old policy model for sampling
+    from transformers import AutoConfig
+    from transformers.modeling_utils import no_init_weights
+    with no_init_weights():
+        transformer_config = AutoConfig.from_pretrained(args.model_name)
+        old_policy_model = AutoModelForCausalLM.from_config(transformer_config).bfloat16()
+        old_policy_model.eval()
+        for param in old_policy_model.parameters():
+            param.requires_grad = False
+    old_policy_model_engine, _, _, _ = deepspeed.initialize(
+            model=old_policy_model,
+            config=ref_ds_config
+    )
     if is_main_process:
         logger.info("Reference model initialized")
     if is_main_process:
@@ -452,6 +469,7 @@ def main():
     )
     trainer = GRPOTrainer(
         model_engine,
+        old_policy_model_engine,
         ref_model_engine,
         training_args,
         tokenizer,
@@ -483,8 +501,8 @@ def main():
         
         for batch_idx,batch in enumerate(dataloader):
             loss,reward_mean,reward_std,mean_kl,average_generation_length = trainer.train_step(batch)
-            model_engine.backward(loss)
-            model_engine.step()
+            # model_engine.backward(loss)
+            # model_engine.step()
             if batch_idx % args.save_steps == 0 and batch_idx > 0:
                 if (args.ds_stage != 3 and is_main_process) or (args.ds_stage == 3):
                     save_checkpoint(model_engine, args.output_dir, epoch, batch_idx,logger)

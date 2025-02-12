@@ -49,13 +49,13 @@ def log_samples(prompt, ground_truth, completion, reward, step, num_generations,
     """Log training samples and rewards"""
     reward = reward.tolist()
     if local_rank <= 0:
-        logging.info(f"Step {step}")
-        logging.info(f"Prompt: {prompt}")
-        logging.info(f"Ground truth: {ground_truth}")
+        logger.info(f"Step {step}")
+        logger.info(f"Prompt: {prompt}")
+        logger.info(f"Ground truth: {ground_truth}")
         for i in range(num_generations):
-            logging.info(f"Completion {i}: {completion[i]}")
-            logging.info(f"Reward {i}: {reward[i]}")
-            logging.info("----------------")
+            logger.info(f"Completion {i}: {completion[i]}")
+            logger.info(f"Reward {i}: {reward[i]}")
+            logger.info("----------------")
 class ConversationDataCollator:
     """Custom collator for conversation data."""
     def __init__(self):
@@ -183,8 +183,6 @@ class GRPOTrainer:
             attention_mask = batch_input_ids != self.tokenizer.pad_token_id
             logits = model(batch_input_ids,attention_mask=attention_mask,use_cache=False).logits
             logits = logits[:, :-1, :]#chunk_batch,T-1,V exclude the last logit
-            if model.local_rank == 0:
-                logging.info(f"Batch {i} logits shape {logits.shape}, require grad {logits.requires_grad}")
             all_logits.append(logits)
             torch.cuda.empty_cache()
         return torch.cat(all_logits, dim=0)#B,T-1,V
@@ -196,12 +194,10 @@ class GRPOTrainer:
         
         try:
             if self.args.local_rank == 0:
-                logging.info(f"Step {self.count}")
+                logger.debug(f"Step {self.count}")
             # Process input batch
             prompts = batch["prompt"]
-            logger.debug(f"Prompts: {prompts}")
             prompts = [self.tokenizer.apply_chat_template(p, tokenize=False, add_generation_prompt=True) for p in prompts]
-            logger.debug(f"Processed prompts: {prompts}")
             # Tokenize
             prompt_inputs = self.tokenizer(
                 prompts,
@@ -214,7 +210,7 @@ class GRPOTrainer:
 
             # Generate completions
             if self.args.local_rank == 0:
-                logging.info("start to generate completions")
+                logger.debug("start to generate completions")
             generations = self._generate_completions(prompt_inputs)
             # generation_logits = generations.logits #B,T,V This is the old policy logits
             #cat logits to B,T,V from tuple of B,V
@@ -226,10 +222,10 @@ class GRPOTrainer:
             generation_logits = generation_logits[:, -logits_to_keep:]#B,T,V
             old_logps = selective_log_softmax(generation_logits[:,-logits_to_keep:,:], generations[:,-logits_to_keep:])
             if self.args.local_rank == 0:
-                logger.info(f'old_logits shape {generation_logits.shape},old_logps shape {old_logps.shape},require grad {old_logps.requires_grad},old_logits require grad {generation_logits.requires_grad}')
+                logger.debug(f'old_logits shape {generation_logits.shape},old_logps shape {old_logps.shape},require grad {old_logps.requires_grad},old_logits require grad {generation_logits.requires_grad}')
             completions = self.tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
             if self.args.local_rank == 0:
-                logger.info(f"Completions: {completions}")
+                logger.debug(f"Completions: {completions}")
             # Calculate rewards
             rewards = self.reward_function(
                 self.preprocess_reward_inputs(prompts, completions, batch)
@@ -242,28 +238,27 @@ class GRPOTrainer:
                         (rewards_shaped.std(dim=1, keepdim=True) + 1e-8)
             advantages = advantages.view(-1)
             if self.args.local_rank == 0:
-                logging.info(f"Start to compute KL divergence")
+                logger.debug(f"Start to compute KL divergence")
                 
             with torch.no_grad():
                 ref_logits = self._batch_chunked_forward(self.ref_model_engine, generations, chunk_batch=self.args.batch_chunk_size) 
                 ref_logits = ref_logits[:,-logits_to_keep:,:]#B,logits_to_keep,V
                 ref_logps = selective_log_softmax(ref_logits, generations[:,-logits_to_keep:])
                 if self.args.local_rank == 0:
-                    logging.info(f"ref_logits shape {ref_logits.shape},ref_logps shape {ref_logps.shape},require grad {ref_logps.requires_grad},ref_logits require grad {ref_logits.requires_grad}")
+                    logger.debug(f"ref_logits shape {ref_logits.shape},ref_logps shape {ref_logps.shape},require grad {ref_logps.requires_grad},ref_logits require grad {ref_logits.requires_grad}")
                 
             #calculate model_logits
             for i in range(self.args.updates_mu):
                 self.model_engine.train()
                 if self.args.local_rank == 0:
-                    logger.info(f"GRPO interation {i}")
+                    logger.debug(f"GRPO interation {i}")
                 #calculate model_logits
                 model_logits = self._batch_chunked_forward(self.model_engine, generations, chunk_batch=self.args.batch_chunk_size)
                 model_logits = model_logits[:,-logits_to_keep:,:]#B,logits_to_keep,V        
                 model_logps = selective_log_softmax(model_logits, generations[:,-logits_to_keep:])   
-                logger.debug(f'model_logits shape {model_logits.shape},model_logps shape {model_logps.shape},require grad {model_logps.requires_grad},model_logits require grad {model_logits.requires_grad}') 
                 per_token_kl = torch.exp(ref_logps - model_logps) - (ref_logps - model_logps) - 1
                 if self.args.local_rank == 0:
-                    logging.info(f"Start to compute rewards and loss")
+                    logger.debug(f"Start to compute rewards and loss")
             
 
                 # Compute loss
@@ -277,8 +272,6 @@ class GRPOTrainer:
 
                 # Clip the importance weights
                 importance_weights_clipped = torch.clamp(importance_weights, 1 - epsilon, 1 + epsilon)
-                logger.debug(f'importance_weights is {importance_weights},importance_weights_clipped is {importance_weights_clipped}')
-                logger.debug(f'importance_weights shape {importance_weights.shape},importance_weights_clipped shape {importance_weights_clipped.shape}')
                 # Calculate the GRPO loss using the minimum of the clipped and unclipped importance weights
                 completion_mask = torch.arange(logits_to_keep, device=generations.device)[None, :] >= 0
                 pad_mask = completion_ids != self.tokenizer.pad_token_id  # Shift to match log_probs dimension
@@ -295,7 +288,7 @@ class GRPOTrainer:
                     log_samples(prompts[0], batch["ground_truth"][0], completions, rewards, self.count, self.args.num_generations, self.args.local_rank)
                 average_generation_length = completion_mask.sum(dim=1).float().mean()
                 if self.args.local_rank == 0:
-                    logging.info("Finish training step")
+                    logger.debug("Finish training step")
                 mean_kl = ((per_token_kl * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
                 self.model_engine.backward(loss)
                 self.model_engine.step()

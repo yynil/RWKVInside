@@ -379,10 +379,9 @@ def main():
         logger.info(f'Enable gradient checkpointing: {args.gradient_checkpointing}')
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
-    model.train()
     for n,p in model.named_parameters():
         if args.is_att_tuning_only:
-            if 'self_attn' not in n:
+            if 'self_attn' not in n and not 'head'  in n:
                 p.requires_grad = False
             else:
                 p.requires_grad = True
@@ -419,6 +418,7 @@ def main():
         param.requires_grad = False
     ref_ds_config = ds_config.copy()
     if args.ds_stage == 3:
+        ref_ds_config["gradient_checkpointing"] = False
         del ref_ds_config["zero_optimization"]["offload_optimizer"] 
     else:
         # 对参考模型禁用 ZeRO 优化

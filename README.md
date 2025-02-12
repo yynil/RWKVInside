@@ -65,3 +65,48 @@ flowchart TB
     class VF0,VF1,VFN,VS vfirst;
     class MLP0,MLP1,MLPN mlp;
 ```
+
+## Training Process
+
+```mermaid
+graph TD
+    A[开始] --> B[参数初始化]
+    B --> C[加载配置文件]
+    C --> D[初始化模型和分词器]
+    D --> E[设置DeepSpeed配置]
+    
+    E --> F{判断训练阶段<br>stage 1/2/3}
+    
+    F -->|Stage 1| G1[初始化教师注意力列表]
+    F -->|Stage 2| G2[初始化完整教师模型]
+    F -->|Stage 3/SFT| G3[跳过教师模型初始化]
+    
+    G1 --> H[准备数据加载器]
+    G2 --> H
+    G3 --> H
+    
+    H --> I[开始训练循环]
+    
+    subgraph 训练循环
+        I --> J[更新学习率和权重衰减]
+        J --> K[前向传播]
+        K --> L[计算损失]
+        L --> M[反向传播]
+        M --> N{是否累积步骤}
+        N -->|是| O[优化器步进]
+        N -->|否| P[继续下一批次]
+        O --> Q{检查保存条件}
+        P --> J
+        Q -->|满足| R[保存检查点]
+        Q -->|不满足| S{检查终止条件}
+        R --> S
+        S -->|继续| J
+        S -->|终止| T[结束训练]
+    end
+    
+    subgraph 损失计算
+        L --> L1[教师损失]
+        L --> L2[KL散度损失]
+        L --> L3[学生交叉熵损失]
+    end
+```

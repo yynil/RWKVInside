@@ -246,7 +246,8 @@ class GRPOTrainer:
                 ref_logps = selective_log_softmax(ref_logits, generations[:,-logits_to_keep:])
                 if self.args.local_rank == 0:
                     logger.debug(f"ref_logits shape {ref_logits.shape},ref_logps shape {ref_logps.shape},require grad {ref_logps.requires_grad},ref_logits require grad {ref_logits.requires_grad}")
-                
+            
+            self.count += 1    
             #calculate model_logits
             for i in range(self.args.updates_mu):
                 self.model_engine.train()
@@ -283,7 +284,6 @@ class GRPOTrainer:
                 
                 # token_loss = -(advantages.unsqueeze(1) - self.args.beta * token_kl) * completion_mask
                 loss = -token_loss.sum() / completion_mask.sum()
-                self.count += 1
                 if self.count % self.args.logging_steps == 0:
                     log_samples(prompts[0], batch["ground_truth"][0], completions, rewards, self.count, self.args.num_generations, self.args.local_rank)
                 average_generation_length = completion_mask.sum(dim=1).float().mean()

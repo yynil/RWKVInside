@@ -131,10 +131,6 @@ class ScriptArguments:
         default=100,
         metadata={"help": "Number of warmup steps"}
     )
-    gradient_accumulation_steps: int = field(
-        default=1,
-        metadata={"help": "Number of gradient accumulation steps"}
-    )
     max_prompt_length: int = field(
         default=512,
         metadata={"help": "Maximum length for input prompts"}
@@ -212,6 +208,11 @@ class ScriptArguments:
     is_att_tuning_only : bool = field(
         default=False,
         metadata={"help": "Attention tuning only"}
+    )
+    
+    grpo_trainer_iterations : int = field(
+        default=4,
+        metadata={"help": "GRPO trainer iterations"}
     )
 def setup_logging(local_rank):
     """Configure logging"""
@@ -335,7 +336,7 @@ def main():
         # Default DeepSpeed config is using ZeRO-3 with CPU offload
         if is_main_process:
             logger.info("Using default DeepSpeed config")
-        train_batch_size = args.per_device_train_batch_size * world_size* args.gradient_accumulation_steps
+        train_batch_size = args.per_device_train_batch_size * world_size* 1
         ds_config = {
                 "distributed_backend": "nccl",
                 "train_batch_size": train_batch_size,
@@ -454,7 +455,7 @@ def main():
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         warmup_steps=args.warmup_steps,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        gradient_accumulation_steps=1,
         max_prompt_length=args.max_prompt_length,
         max_completion_length=args.max_completion_length,
         num_generations=args.num_generations,
@@ -465,7 +466,8 @@ def main():
         local_rank=args.local_rank,
         chunk_size=args.chunk_size,
         batch_chunk_size=args.batch_chunk_size,
-        ds_stage=args.ds_stage
+        ds_stage=args.ds_stage,
+        updates_mu=args.grpo_trainer_iterations
     )
     trainer = GRPOTrainer(
         model_engine,

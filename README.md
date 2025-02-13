@@ -110,7 +110,9 @@ graph TD
         L --> L3[学生交叉熵损失]
     end
 ```
+### Training shell
 
+The training shell is the train.sh. Please  refer the train_memo.txt for more details for training in different stages.
 
 ## RL Training Process
 
@@ -159,3 +161,9 @@ flowchart TB
         Y --> Z[记录到WandB]
     end
 ```
+
+### GRPO Algorithm from https://arxiv.org/pdf/2402.03300v3
+
+![alt text](image-1.png)
+
+The implementation of GRPO algorithm is rl/grpo_trainer.py , please refer the code for more details. TRL just eliminates the GRPO iteration and ignore the memory efficiency for large data in relative small machines. That's why we implement our own GRPO algorithm.

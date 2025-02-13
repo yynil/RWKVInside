@@ -244,19 +244,7 @@ def train_step(model, batch, args, teacher_engine=None, tokenizer=None):
     
     # 5. 非SFT模式的处理
     if args.stage == 2:
-        teacher_logits, teacher_loss = get_teacher_outputs(  0%|                                                                                                                                                                                                                                                                                            | 0/98750 [00:00<?, ?it/s]2025-02-13 17:41:09.%f [PID:2711920] [TID:139752609310528] DEBUG - Popen(['git', 'rev-parse', '--show-toplevel'], cwd=/home/yueyulin/github/RWKVInside, stdin=None, shell=False, universal_newlines=False)
-2025-02-13 17:41:09.%f [PID:2711920] [TID:139752609310528] DEBUG - Popen(['git', 'rev-parse', '--show-toplevel'], cwd=/home/yueyulin/github/RWKVInside, stdin=None, shell=False, universal_newlines=False)
-2025-02-13 17:41:09.%f [PID:2711920] [TID:139741032863296] DEBUG - Starting new HTTPS connection (1): api.wandb.ai:443
-2025-02-13 17:41:10.%f [PID:2711920] [TID:139741032863296] DEBUG - https://api.wandb.ai:443 "POST /graphql HTTP/11" 200 2026
-2025-02-13 17:41:10.%f [PID:2711920] [TID:139741032863296] DEBUG - https://api.wandb.ai:443 "POST /graphql HTTP/11" 200 357
-wandb: Currently logged in as: yueyu-lin. Use `wandb login --relogin` to force relogin
-2025-02-13 17:41:10.%f [PID:2711920] [TID:139752609310528] DEBUG - Popen(['git', 'cat-file', '--batch-check'], cwd=/home/yueyulin/github/RWKVInside, stdin=<valid stream>, shell=False, universal_newlines=False)
-[2025-02-13 17:41:12,849] [INFO] [launch.py:319:sigkill_handler] Killing subprocess 2711920
-[2025-02-13 17:41:14,935] [INFO] [launch.py:319:sigkill_handler] Killing subprocess 2711921
-[2025-02-13 17:41:14,954] [INFO] [launch.py:319:sigkill_handler] Killing subprocess 2711922
-[2025-02-13 17:41:14,955] [INFO] [launch.py:319:sigkill_handler] Killing subprocess 2711923
-[2025-02-13 17:41:14,973] [ERROR] [launch.py:325:sigkill_handler] ['/home/yueyulin/miniconda3/envs/new_torch_env/bin/python', '-u', 'rl/deepspeed_rl_train.py', '--local_rank=3', '--data_file', '/home/yueyulin/data/MetaMathQA-395K-processed.jsonl', '--model_name', '/home/yueyulin/model/qwen_1.5b_r1_hf/', '--output_dir', '/tmp/xxx', '--max_completion_length', '1024', '--wandb_project', 'server1_4090', '--wandb_run_name', 'rl_grpo_1b5', '--num_generations', '6', '--logging_steps', '10', '--ds_stage', '3', '--ds_param_offload', 'True', '--ds_optimizer_offload', 'True', '--batch_chunk_size', '1', '--gradient_checkpointing', 'True', '--is_att_tuning_only', 'True', '--grpo_trainer_iterations', '8'] exits with return code = 1
-            teacher_engine, input_ids, attention_mask, labels, args)
+        teacher_logits, teacher_loss = get_teacher_outputs(teacher_engine, input_ids, attention_mask, labels, args)
         student_outputs = get_student_outputs(
             model, args, input_ids, labels, attention_mask)
         loss, kl_loss, student_ce_loss = compute_kl_loss(

@@ -305,6 +305,7 @@ class TypedStreamingCLMDataCollator:
     typed_dataset: TypedDataset
     pad_to_multiple_of: Optional[int] = None
     need_to_pad: bool = False
+    padding_side :str = "left"
     
     def concatenate_if_needed(self, text: str, is_conversation: bool) -> str:
         """Concatenate text with random samples of the same type if it's too short"""
@@ -341,6 +342,7 @@ class TypedStreamingCLMDataCollator:
             max_length=self.max_length,
             padding="max_length",
             return_tensors="pt",
+            padding_side=self.padding_side
         )
         
         input_ids = tokenized["input_ids"]

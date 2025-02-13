@@ -202,24 +202,27 @@ class GRPOTrainer:
             prompt_inputs = self.tokenizer(
                 prompts,
                 return_tensors="pt",
-                padding=True,
+                padding="longest",
                 truncation=True,
                 max_length=self.args.max_prompt_length,
-                add_special_tokens=False
-            ).to(self.model_engine.device)
+                add_special_tokens=False,
+                padding_side="left"
+            ).to(self.model_engine.device)#B,T
 
             # Generate completions
             if self.args.local_rank == 0:
-                logger.debug("start to generate completions")
+                logger.debug(f"start to generate completions with prompt_inputs shape {prompt_inputs['input_ids'].shape}")
             generations = self._generate_completions(prompt_inputs)
+            if self.args.local_rank == 0:
+                logger.debug("finish generating completions")
             # generation_logits = generations.logits #B,T,V This is the old policy logits
             #cat logits to B,T,V from tuple of B,V
             generation_logits = torch.cat([logit.unsqueeze(1) for logit in generations.logits], dim=1)
-            generations = generations.sequences
+            generations = generations.sequences#B*self.args.num_generations,T+GENERATION_LENGTH
             prompt_length = prompt_inputs["input_ids"].size(1)
-            completion_ids = generations[:, prompt_length:]#B,T
-            logits_to_keep = completion_ids.size(1) #T-promt_length
-            generation_logits = generation_logits[:, -logits_to_keep:]#B,T,V
+            completion_ids = generations[:, prompt_length:]#B*self.args.num_generations,GENERATION_LENGTH
+            logits_to_keep = completion_ids.size(1) #GENERATION_LENGTH
+            generation_logits = generation_logits[:, -logits_to_keep:]#B,GENERATION_LENGTH,V
             old_logps = selective_log_softmax(generation_logits[:,-logits_to_keep:,:], generations[:,-logits_to_keep:])
             if self.args.local_rank == 0:
                 logger.debug(f'old_logits shape {generation_logits.shape},old_logps shape {old_logps.shape},require grad {old_logps.requires_grad},old_logits require grad {generation_logits.requires_grad}')
@@ -233,10 +236,10 @@ class GRPOTrainer:
             rewards = rewards.to(self.model_engine.device)
 
             # Normalize rewards
-            rewards_shaped = rewards.view(-1, self.args.num_generations)
+            rewards_shaped = rewards.view(-1, self.args.num_generations)#B,num_generations
             advantages = (rewards_shaped - rewards_shaped.mean(dim=1, keepdim=True)) / \
                         (rewards_shaped.std(dim=1, keepdim=True) + 1e-8)
-            advantages = advantages.view(-1)
+            advantages = advantages.view(-1)#B*num_generations
             if self.args.local_rank == 0:
                 logger.debug(f"Start to compute KL divergence")
                 

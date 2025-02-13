@@ -492,7 +492,8 @@ def main():
         )
     #delete the output_dir if it exists
     if os.path.exists(args.output_dir):
-        os.rmdir(args.output_dir)
+        import shutil
+        shutil.rmtree(args.output_dir)
         
     for epoch in range(args.num_epochs):
         if is_main_process:
@@ -502,6 +503,8 @@ def main():
         sampler.set_epoch(time_seed)  # 使用时间戳作为种子
         
         for batch_idx,batch in enumerate(dataloader):
+            if is_main_process:
+                logger.debug(f'batch_idx: {batch_idx} batch: {batch}')
             loss,reward_mean,reward_std,mean_kl,average_generation_length = trainer.train_step(batch)
             # model_engine.backward(loss)
             # model_engine.step()

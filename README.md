@@ -110,3 +110,52 @@ graph TD
         L --> L3[学生交叉熵损失]
     end
 ```
+
+
+## RL Training Process
+
+```mermaid
+flowchart TB
+    subgraph Init["初始化阶段"]
+        A[解析命令行参数] --> B[设置分布式环境]
+        B --> C[加载分词器]
+        C --> D[加载数据集]
+        D --> E[创建DataLoader]
+        E --> F[初始化DeepSpeed配置]
+    end
+
+    subgraph Models["模型初始化"]
+        F --> G[初始化主模型]
+        G --> H[初始化参考模型]
+        H --> I[初始化旧策略模型]
+        I --> J[配置优化器]
+    end
+
+    subgraph Training["训练循环"]
+        J --> K[进入训练轮次]
+        K --> L[批次训练]
+        L --> M{是否需要保存检查点}
+        M -->|是| N[保存模型检查点]
+        M -->|否| O[继续训练]
+        N --> O
+        O --> P{轮次结束?}
+        P -->|否| L
+        P -->|是| Q[保存轮次检查点]
+        Q --> R{全部轮次完成?}
+        R -->|否| K
+        R -->|是| S[训练结束]
+    end
+
+    subgraph TrainStep["批次训练步骤(GRPOTrainer)"]
+        L --> T[生成完成内容]
+        T --> U[计算奖励]
+        U --> V[计算KL散度]
+        V --> W[多次更新迭代]
+        W --> X[返回训练指标]
+    end
+
+    subgraph Metrics["指标记录"]
+        X --> Y[更新累计统计]
+        Y --> Z[记录到WandB]
+    end
+```

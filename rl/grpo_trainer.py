@@ -293,6 +293,22 @@ class GRPOTrainer:
                 if self.args.local_rank == 0:
                     logger.debug("Finish training step")
                 mean_kl = ((per_token_kl * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
+                #tmp codes to save inputs and the corresponding loss value
+                # if self.count <= 3 and i == 0 and self.args.local_rank == 0:
+                #     #save inputs and loss in pk file
+                #     import pickle
+                #     with open(f'inputs_{self.count}.pk','wb') as f:
+                #         obj = {
+                #             'ref_logps':ref_logps,
+                #             'old_logps':old_logps,
+                #             'epsilon':epsilon,
+                #             'completion_mask':completion_mask,
+                #             'advantages':advantages,
+                #             'loss':loss,
+                #             'rewards':rewards,
+                #         }
+                #         pickle.dump(obj,f)
+                #         print(f'save inputs and loss in inputs_{self.count}.pk')
                 self.model_engine.backward(loss)
                 self.model_engine.step()
             return loss,rewards.mean(),rewards.std(),mean_kl,average_generation_length

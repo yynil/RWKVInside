@@ -491,7 +491,7 @@ def main():
             config=vars(args)
         )
     #delete the output_dir if it exists
-    if os.path.exists(args.output_dir):
+    if os.path.exists(args.output_dir) and model_engine.local_rank == 0:
         import shutil
         shutil.rmtree(args.output_dir)
         

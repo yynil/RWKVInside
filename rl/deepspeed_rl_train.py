@@ -14,14 +14,57 @@ from transformers import HfArgumentParser, AutoTokenizer,AutoModelForCausalLM
 from dataclasses import dataclass, field
 import logging
 import json
-from typing import Optional
+from typing import Optional,Tuple
 from grpo_trainer import GRPOTrainer, GRPOConfig, ConversationDataCollator
 from deepspeed.utils.zero_to_fp32 import convert_zero_checkpoint_to_fp32_state_dict
 from functools import partial
 from profiler import time_function, timer
 from utilities import compare_latex_numbers
 import time  # 添加这一行
-
+from langdetect import detect, LangDetectException
+import regex as re
+logger = logging.getLogger(__name__)
+def detect_main_language(text: str) -> str:
+    """
+    检测文本的主要语言
+    返回语言代码 (en, zh-cn, etc.)
+    """
+    try:
+        # 去除数学公式和标签，避免干扰语言检测
+        cleaned_text = re.sub(r'\\[^{]+\{[^}]+\}', '', text)
+        cleaned_text = re.sub(r'<[^>]+>', '', cleaned_text)
+        if not cleaned_text.strip():
+            return "unknown"
+        return detect(cleaned_text)
+    except LangDetectException:
+        return "unknown"
+    
+def calculate_language_consistency_score(prompt_lang: str, completion_lang: str) -> float:
+    """
+    计算语言一致性得分
+    完全一致: +0.2
+    都是中英文混合: +0.1
+    完全不一致: -0.1
+    """
+    if prompt_lang == "unknown" or completion_lang == "unknown":
+        return 0.0
+        
+    if prompt_lang == completion_lang:
+        return 0.2
+    
+    # 中英文混合情况的处理
+    cjk_langs = {"zh-cn", "zh-tw", "ja", "ko"}
+    western_langs = {"en", "es", "fr", "de"}
+    
+    is_prompt_cjk = prompt_lang in cjk_langs
+    is_completion_cjk = completion_lang in cjk_langs
+    is_prompt_western = prompt_lang in western_langs
+    is_completion_western = completion_lang in western_langs
+    
+    if (is_prompt_cjk and is_completion_western) or (is_prompt_western and is_completion_cjk):
+        return 0.1
+        
+    return -0.1
 @time_function
 def preprocess_reward_inputs(prompts: list, completions: list, inputs: list):
     """Default preprocessing for reward inputs.
@@ -50,48 +93,103 @@ def preprocess_reward_inputs(prompts: list, completions: list, inputs: list):
                 "ground_truth": ground_truth
             })
     return processed_inputs
+def validate_think_tags(completion: str) -> Tuple[float, int]:
+    """
+    验证思考标签的合法性和完整性
+    返回: (得分, 有效思考段落数)
+    """
+    import re
+    reward = 0
+    # 使用栈来检查标签匹配
+    stack = []
+    # 找出所有think相关标签
+    tags = re.finditer(r'<(/?)think>', completion)
+    valid_segments = 0
+    
+    for tag in tags:
+        if tag.group(1) == '':  # 开始标签
+            stack.append(tag)
+        else:  # 结束标签
+            if not stack:  # 有结束标签但没有对应的开始标签
+                return 0, 0
+            start_tag = stack.pop()
+            # 提取这对标签之间的内容
+            content = completion[start_tag.end():tag.start()]
+            if len(content.strip()) >= 10:  # 有效思考内容
+                valid_segments += 1
+                
+    if stack:  # 有未闭合的标签
+        return 0, 0
+        
+    # 根据有效思考段落数计算得分
+    if valid_segments > 0:
+        reward = 0.2 * min(valid_segments, 3)  # 最多计算3段
+        
+    return reward, valid_segments
+
+def extract_last_boxed(completion: str) -> Tuple[str, float]:
+    """
+    提取最后一个有效的boxed内容
+    返回: (答案内容, 格式得分)
+    """
+    import re
+    boxed_matches = list(re.finditer(r'\\boxed\{([^{}]+)\}', completion))
+    
+    if not boxed_matches:
+        return "", 0
+        
+    # 给予基础格式分数
+    format_score = 0.2
+    
+    # 取最后一个boxed作为答案
+    last_match = boxed_matches[-1]
+    answer = last_match.group(1).strip()
+    
+    return answer, format_score
+
 @time_function    
 def reward_function(inputs):
     """Calculate rewards based on model outputs"""
-    # logging.info(f'reward function inputs: {inputs}')
     rewards = []
     for input_data in inputs:
         completion = input_data['completion']
         ground_truth = input_data['ground_truth']
-        #check if the ground_truth is a number
-        is_number_ground_truth = False
-        try:
-            ground_truth = ground_truth.strip().replace(" ", "").replace(",", "")
-            value_ground_truth = float(ground_truth)
-            is_number_ground_truth = True
-        except ValueError:
-            is_number_ground_truth = False
+        prompt = input_data['prompt']
+        
         reward = 0
         
-        # Check for thinking structure
-        index = completion.find("<think>")
-        if index != -1:
-            next_index = completion.find("</think>")
-            if next_index != -1:
-                reward += 0.2
-            else:
-                reward += 0.1
+        # 1. 语言一致性检查
+        prompt_lang = detect_main_language(prompt)
+        completion_lang = detect_main_language(completion)
+        language_score = calculate_language_consistency_score(prompt_lang, completion_lang)
+        reward += language_score
+        
+        # 2. 检查思考结构
+        think_reward, valid_segments = validate_think_tags(completion)
+        reward += think_reward
+        
+        # 3. 检查答案正确性
+        try:
+            ground_truth = ground_truth.strip().replace(" ", "").replace(",", "")
+            boxed_answer, format_score = extract_last_boxed(completion)
+            
+            if boxed_answer:  # 如果找到了boxed答案
+                reward += format_score  # 加上格式分
                 
-        # Check for correct answer in \boxed{} format
-        if is_number_ground_truth:
-            #found the \boxed{} format
-            index_of_boxed = completion.find("\\boxed{")
-            if index_of_boxed != -1:
-                next_index_of_boxed = completion.find("}", index_of_boxed)
-                boxed_ground_truth = completion[index_of_boxed+len("\\boxed{"):next_index_of_boxed]
-                if compare_latex_numbers(boxed_ground_truth,ground_truth):
-                    reward += 0.6
-        else:    
-            boxed_ground_truth = f'\\boxed{{{ground_truth}}}'
-            if boxed_ground_truth in completion:
-                reward += 0.6
+                # 尝试数值比较
+                try:
+                    if compare_latex_numbers(boxed_answer, ground_truth):
+                        reward += 0.6
+                except ValueError:
+                    # 如果不是数值，进行文本比较
+                    if boxed_answer.lower() == ground_truth.lower():
+                        reward += 0.6
+                        
+        except Exception as e:
+            logger.warning(f"Error in answer validation: {str(e)}")
             
         rewards.append(reward)
+    
     return torch.tensor(rewards, dtype=torch.float)
 @dataclass
 class ScriptArguments:
@@ -430,19 +528,7 @@ def main():
             config=ref_ds_config
     )
     del ref_model
-    #prepare old policy model for sampling
-    from transformers import AutoConfig
-    from transformers.modeling_utils import no_init_weights
-    with no_init_weights():
-        transformer_config = AutoConfig.from_pretrained(args.model_name)
-        old_policy_model = AutoModelForCausalLM.from_config(transformer_config).bfloat16()
-        old_policy_model.eval()
-        for param in old_policy_model.parameters():
-            param.requires_grad = False
-    old_policy_model_engine, _, _, _ = deepspeed.initialize(
-            model=old_policy_model,
-            config=ref_ds_config
-    )
+    
     if is_main_process:
         logger.info("Reference model initialized")
     if is_main_process:
@@ -472,7 +558,6 @@ def main():
     )
     trainer = GRPOTrainer(
         model_engine,
-        old_policy_model_engine,
         ref_model_engine,
         training_args,
         tokenizer,

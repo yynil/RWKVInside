@@ -108,7 +108,7 @@ def selective_log_softmax_old(logits, index):
     return per_token_logps
 
 @time_function
-def selective_log_softmax(logits, index, chunk_size=2):
+def selective_log_softmax(logits, index, chunk_size=1):
     """Memory-efficient implementation of selective log softmax.
     
     Args:
@@ -119,46 +119,43 @@ def selective_log_softmax(logits, index, chunk_size=2):
     Returns:
         Log probabilities for selected indices
     """
-    if logits.dtype not in [torch.float32, torch.float64]:
-        # Handle non-float types via original implementation
-        per_token_logps = []
-        for row_logits, row_labels in zip(logits, index):
-            row_logps = F.log_softmax(row_logits, dim=-1)
-            row_per_token_logps = row_logps.gather(dim=-1, index=row_labels.unsqueeze(-1)).squeeze(-1)
-            per_token_logps.append(row_per_token_logps)
-        return torch.stack(per_token_logps)
-    
-    # Process in chunks to reduce memory usage
+    device = logits.device
     batch_size, seq_len, vocab_size = logits.shape
     all_per_token_logps = []
     
-    # Process in sequence length chunks to reduce memory usage
+    # Process in batch chunks
     for i in range(0, batch_size, chunk_size):
         chunk_end = min(i + chunk_size, batch_size)
-        chunk_logits = logits[i:chunk_end].detach()  # Detach to save memory
+        chunk_logits = logits[i:chunk_end]  # [chunk_size, seq_len, vocab_size]
         chunk_index = index[i:chunk_end]
         
-        # Compute max per position for numerical stability
-        max_logits = chunk_logits.max(dim=-1, keepdim=True)[0]
-        chunk_logits = chunk_logits - max_logits
-        
-        # Compute log softmax efficiently
-        exp_logits = chunk_logits.exp()
-        log_denominator = exp_logits.sum(dim=-1, keepdim=True).log()
-        
-        # Get log probs for selected indices
-        selected_logits = chunk_logits.gather(
-            dim=-1, 
-            index=chunk_index.unsqueeze(-1)
-        )
-        chunk_log_probs = (selected_logits - log_denominator).squeeze(-1)
+        with torch.amp.autocast('cuda'):
+            # 计算全局 max，保持数值稳定性
+            max_logits = chunk_logits.max()  # 全局最大值
+            chunk_logits = chunk_logits - max_logits
+            
+            # 分片计算 logsumexp
+            log_denominator = torch.zeros(chunk_logits.shape[:-1], device=device)
+            for j in range(0, vocab_size, 1024):  # 按词表维度分片
+                j_end = min(j + 1024, vocab_size)
+                log_denominator += torch.exp(chunk_logits[..., j:j_end]).sum(dim=-1)
+            
+            log_denominator = torch.log(log_denominator) + max_logits
+            
+            # 获取选定索引的 logits
+            selected_logits = chunk_logits.gather(
+                dim=-1, 
+                index=chunk_index.unsqueeze(-1)
+            ).squeeze(-1) + max_logits
+            
+            # 计算最终的 log probabilities
+            chunk_log_probs = selected_logits - log_denominator
         
         all_per_token_logps.append(chunk_log_probs)
         
-        # Clean up
-        del chunk_logits, exp_logits, log_denominator, selected_logits
-        if i % (chunk_size * 4) == 0:  # Periodic cleanup
-            torch.cuda.empty_cache()
+        # 清理内存
+        del chunk_logits, log_denominator, selected_logits
+        torch.cuda.empty_cache()
             
     return torch.cat(all_per_token_logps, dim=0)
 
@@ -235,7 +232,6 @@ class GRPOTrainer:
     def __init__(
         self,
         model_engine,
-        old_model_engine,
         ref_model_engine,
         args,
         tokenizer,
@@ -244,7 +240,6 @@ class GRPOTrainer:
     ):
         
         self.model_engine = model_engine
-        self.old_model_engine = old_model_engine
         self.ref_model_engine = ref_model_engine
         self.args = args
         self.tokenizer = tokenizer

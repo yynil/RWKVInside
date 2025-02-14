@@ -350,9 +350,14 @@ class TypedStreamingCLMDataCollator:
         labels = input_ids.clone()
         
         # Shift labels for next token prediction
-        labels[:, :-1] = input_ids[:, 1:]
-        last_token = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else -100
-        labels[:, -1] = last_token
+        if self.padding_side == "right":
+            labels[:, :-1] = input_ids[:, 1:]
+            last_token = self.tokenizer.pad_token_id
+            labels[:, -1] = last_token
+        else:
+            labels[:, 1:] = input_ids[:, :-1]
+            first_token = self.tokenizer.pad_token_id 
+            labels[:, 0] = first_token
         
         # Handle padding in labels
         labels[attention_mask == 0] = -100

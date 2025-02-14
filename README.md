@@ -129,8 +129,7 @@ flowchart TB
     subgraph Models["模型初始化"]
         F --> G[初始化主模型]
         G --> H[初始化参考模型]
-        H --> I[初始化旧策略模型]
-        I --> J[配置优化器]
+        H --> J[配置优化器]
     end
 
     subgraph Training["训练循环"]

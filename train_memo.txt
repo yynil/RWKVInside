@@ -17,3 +17,8 @@ sh train.sh -c configs/qwen_0.5b.yaml -l 0.0001 -f 0.00001 -m 2048 -b 2 -r "/hom
 
 1. Stage 1 Training Qwen7B-R1
 nohup sh train.sh -c configs/qwen_7b_r1.yaml -l 0.0001 -f 0.00001 -m 2048 -b 8 -r "/data/yueyu/mysft/ /data/yueyu/additional_jsonl/split_files/ /data/yueyu/additional_jsonl/raw_splits/ /data/yueyu/chinese-fineweb-edu/data/ /data/yueyu/dclm-10B/ /data/yueyu/finemath-4plus /data/yueyu/Magpie-Qwen2.5-Pro-1M-v0.1/data/" -o /data/yueyu/output/7B_V7_Stage1_FixVFirstShare_ATTENTIONMASK_NONORM_NOGATE_FREEMLP_R1_LEFTPAD -g 1 -F 0 -d 1 -t 4000_000_000 -T 0.2 -R v7 -s 1 -G 8 -D hybrid_trainer_H800 -P 7B_V7_Stage1_FixVFirstShare_ATTENTIONMASK_NONORM_NOGATE_FREEMLP_R1_LEFTPAD -e 1 -z 1 > /data/yueyu/7B_V7_Stage1_FixVFirstShare_ATTENTIONMASK_NONORM_NOGATE_FREEMLP_R1_LEFTPAD.txt 2>&1 &
+
+2. Stage 2 Training Qwen7B-R1
+nohup sh train.sh -c configs/qwen_7b_r1.yaml -l 0.0001 -f 0.00001 -m 2048 -b 8 -r "/data/yueyu/mysft/ /data/yueyu/additional_jsonl/split_files/ /data/yueyu/additional_jsonl/raw_splits/ /data/yueyu/chinese-fineweb-edu/data/ /data/yueyu/dclm-10B/ /data/yueyu/finemath-4plus /data/yueyu/Magpie-Qwen2.5-Pro-1M-v0.1/data/" -o /data/yueyu/output/7B_V7_Stage2_FixVFirstShare_ATTENTIONMASK_NONORM_NOGATE_FREEMLP_R1_LEFTPAD -g 1 -F 0 -d 1 -t 2000_000_000 -T 0.2 -R v7 -s 2 -G 8 -D hybrid_trainer_H800 -P 7B_V7_Stage2_FixVFirstShare_ATTENTIONMASK_NONORM_NOGATE_FREEMLP_R1_LEFTPAD -e 1 -z 1 -k /data/yueyu/output/7B_V7_Stage1_FixVFirstShare_ATTENTIONMASK_NONORM_NOGATE_FREEMLP_R1_LEFTPAD/pytorch_model.bin > /data/yueyu/7B_V7_Stage2_FixVFirstShare_ATTENTIONMASK_NONORM_NOGATE_FREEMLP_R1_LEFTPAD.txt 2>&1 &
+
+/data/yueyu/output/7B_V7_Stage1_FixVFirstShare_ATTENTIONMASK_NONORM_NOGATE_FREEMLP_R1_LEFTPAD/pytorch_model.bin

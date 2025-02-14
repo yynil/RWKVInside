@@ -18,10 +18,11 @@ from typing import Optional
 from grpo_trainer import GRPOTrainer, GRPOConfig, ConversationDataCollator
 from deepspeed.utils.zero_to_fp32 import convert_zero_checkpoint_to_fp32_state_dict
 from functools import partial
-from profiler import timer
+from profiler import time_function, timer
 from utilities import compare_latex_numbers
 import time  # 添加这一行
 
+@time_function
 def preprocess_reward_inputs(prompts: list, completions: list, inputs: list):
     """Default preprocessing for reward inputs.
     
@@ -49,7 +50,7 @@ def preprocess_reward_inputs(prompts: list, completions: list, inputs: list):
                 "ground_truth": ground_truth
             })
     return processed_inputs
-    
+@time_function    
 def reward_function(inputs):
     """Calculate rewards based on model outputs"""
     # logging.info(f'reward function inputs: {inputs}')

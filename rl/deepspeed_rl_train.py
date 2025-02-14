@@ -363,7 +363,7 @@ def save_checkpoint(model_engine, output_dir, epoch, step,logger):
                 shutil.rmtree(os.path.join(output_dir, checkpoints[0]))    
     output_dir = f"{output_dir}/epoch_{epoch}_step_{step}"
     print(f'saving checkpoint to {output_dir}')
-    if not os.path.exists(output_dir):
+    if model_engine.local_rank == 0 and not os.path.exists(output_dir):
         os.makedirs(output_dir)
     
     model_engine.save_checkpoint(output_dir)

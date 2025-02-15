@@ -170,6 +170,10 @@ The implementation of GRPO algorithm is rl/grpo_trainer.py , please refer the co
 
 ## Data preparation 🤗
 - prepare input Raw data in [input_Raw_data_dir]
+### Datasets Format(Jsonl format)
+{"text": "<｜begin▁of▁sentence｜>A conversation between User and Assistant. The user asks a question, and the Assistant solves it. The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. The reasoning process are enclosed within <think> </think>, i.e., <think> reasoning process here </think>**Final Answer:**\nanswer here. 
+<｜User｜>......<｜Assistant｜>\n<think>\n......\n</think>\n\n......<｜end▁of▁sentence｜>"}
+
 ## Build Environment 🤯
 ```bash
 sudo apt install python3.12-venv
@@ -177,40 +181,54 @@ sudo apt install python3.12-venv
 ```bash
 python -m venv .venv --system-site-packages
 source .venv/bin/activate
-pip install torch torchvision torchaudio gradio rwkv-fla accelerate deepspeed cupy
+pip install torch torchvision torchaudio gradio rwkv-fla accelerate deepspeed wandb 
 git clone https://github.com/uniartisan/transformers.git
 cd ./transformers
 pip install . 
 ```
+
 ## Train model 😋
 - AMD complite Config '-xhip', '-fopenmp', '-ffast-math', '-O3', '--offload-arch=gfx1100','-munsafe-fp-atomics'
 - Nvidia complite Config '-res-usage', '--maxrregcount 60', '--use_fast_math', '-O3', '-Xptxas -O3'
+
 ### Stage 1 
 - Training for Qwen 0.5B with Norm
 
 ```bash
-sh train.sh -c configs/qwen_0.5b.yaml -l 0.0001 -f 0.00001 -m 2048 -b 2 -r "[input_Raw_data_dir_1] [input_Raw_data_dir_2] [input_Raw_data_dir_3]..." -o [output_model_path]  -g 1 -F 0 -d 1 -t 1000_000_000 -T 0.2 -R v7 -s 1 -M 1
+sh train.sh -c configs/qwen_0.5b.yaml -l 0.0001 -f 0.00001 -m 2048 -b 2 -r "[input_Raw_data_dir_1] [input_Raw_data_dir_2] [input_Raw_data_dir_3]..." -o [output_model_path]  -g 1 -F 0 -d 1 -t 1000_000_000 -T 0.2 -R v7 -s 1 -M 1 -G [Use GPU number]
 ```
 ### Stage 2
 - Training for Qwen 0.5B with Norm
 ```bash
-sh train.sh -c configs/qwen_0.5b.yaml -l 0.0001 -f 0.00001 -m 2048 -b 2 -r "[input_Raw_data_dir_1] [input_Raw_data_dir_2] [input_Raw_data_dir_3]..." -o [Stage_1_output_model_dir]  -g 1 -F 0 -d 1 -t 1000_000_000 -T 0.2 -R v7 -s 2 -k [output_deepspeed_model_weight_dir] -M 1
+sh train.sh -c configs/qwen_0.5b.yaml -l 0.0001 -f 0.00001 -m 2048 -b 2 -r "[input_Raw_data_dir_1] [input_Raw_data_dir_2] [input_Raw_data_dir_3]..." -o [Stage_1_output_model_dir]  -g 1 -F 0 -d 1 -t 1000_000_000 -T 0.2 -R v7 -s 2 -k [output_deepspeed_model_weight_dir] -M 1 -G [Use GPU number]
 ```
 
 - Training for Qwen 0.5B with Norm and freez mlp
 ```bash
-sh train.sh -c configs/qwen_0.5b.yaml -l 0.0001 -f 0.00001 -m 2048 -b 2 -r "[input_Raw_data_dir_1] [input_Raw_data_dir_2] [input_Raw_data_dir_3]..." -o [Stage_1_output_model_dir]  -g 1 -F 0 -d 1 -t 1000_000_000 -T 0.2 -R v7 -s 2 -k [output_deepspeed_model_weight_dir] -M 1 -z 1
+sh train.sh -c configs/qwen_0.5b.yaml -l 0.0001 -f 0.00001 -m 2048 -b 2 -r "[input_Raw_data_dir_1] [input_Raw_data_dir_2] [input_Raw_data_dir_3]..." -o [Stage_1_output_model_dir]  -g 1 -F 0 -d 1 -t 1000_000_000 -T 0.2 -R v7 -s 2 -k [output_deepspeed_model_weight_dir] -M 1 -z 1 -G [Use GPU number]
 ```
 
 - Training for Qwen 0.5B with Norm and freez mlp and use another teacher model
 ```bash
-sh train.sh -c configs/qwen_0.5b.yaml -l 0.0001 -f 0.00001 -m 2048 -b 2 -r "[input_Raw_data_dir_1] [input_Raw_data_dir_2] [input_Raw_data_dir_3]..." -o [Stage_1_output_model_dir]  -g 1 -F 0 -d 1 -t 1000_000_000 -T 0.2 -R v7 -s 2 -k [output_deepspeed_model_weight_dir] -M 1 -z 1 -i [Another_Instruct_teacher_model_dir_with_config]
+sh train.sh -c configs/qwen_0.5b.yaml -l 0.0001 -f 0.00001 -m 2048 -b 2 -r "[input_Raw_data_dir_1] [input_Raw_data_dir_2] [input_Raw_data_dir_3]..." -o [Stage_1_output_model_dir]  -g 1 -F 0 -d 1 -t 1000_000_000 -T 0.2 -R v7 -s 2 -k [output_deepspeed_model_weight_dir] -M 1 -z 1 -i [Another_Instruct_teacher_model_dir_with_config] -G [Use GPU number]
 ```
 
 [Jump to document describes the usage of the `train.sh` script for model training with DeepSpeed](./Train.md)
-
-#### Because cupy only supports up to ROCm5.0, it cannot be trained on AMDGPU, but ROCM Pytorch can be used for infrence.
-
+### If you want to train on AMD GPU (Test passed on Ubuntu 24.04 with W7900)🤯
+#### 1. Because cupy only supports up to ROCm5.0 so we need to remove “impot cupy”
+#### 2. Modify ./cuda/wkv7_cuda.cu 
+```cpp
+using bf = __nv_bfloat16;
+__device__ inline float to_float(const bf & u) { return __bfloat162float(u); }
+__device__ inline bf to_bf(const float & u) { return __float2bfloat16_rn(u); }
+```
+to
+```cpp
+using bf = __nv_bfloat16;
+__device__ inline float to_float(const bf & u) { return __bfloat162float(u); }
+__device__ inline bf to_bf(const float & u) { return __float2bfloat16(u); }
+```
+#### 3. Change All deepspeed ```backend='nccl'``` to ```backend='rccl'``` in ./train_scripts/train_hybrid_deepspeed.py 
 # Infrence on Nvidia GPU 🚀
 
 ## prepare model
@@ -237,7 +255,7 @@ python ./test/test_hf_gradio.py [model_config_dir]
 python ./test/test_hf.py [model_config_dir]
 ```
 
-# Infrence on AMD Radeon GPU (Test on Ubuntu 24.04 with W7900 & RX6750xt)🚀
+# Infrence on AMD Radeon GPU (Test passed on Ubuntu 24.04 with W7900 & RX6750xt)🚀
 1. [install ROCM Doc on Official Documentation](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/install/install-methods/package-manager-index.html)
 2. Build Environment
 ```bash
@@ -246,8 +264,12 @@ sudo apt install python3.12-venv
 ```bash
 python -m venv .venv --system-site-packages
 source .venv/bin/activate
+```
+```bash
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2.4
 pip install gradio rwkv-fla accelerate deepspeed cupy
+```
+```bash
 git clone https://github.com/uniartisan/transformers.git
 cd ./transformers
 pip install . 

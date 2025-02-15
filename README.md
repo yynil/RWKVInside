@@ -166,3 +166,111 @@ flowchart TB
 ![alt text](image-1.png)
 
 The implementation of GRPO algorithm is rl/grpo_trainer.py , please refer the code for more details. TRL just eliminates the GRPO iteration and ignore the memory efficiency for large data in relative small machines. That's why we implement our own GRPO algorithm.
+# Training 🔥
+
+## Data preparation 🤗
+- prepare input Raw data in [input_Raw_data_dir]
+## Build Environment 🤯
+```bash
+sudo apt install python3.12-venv
+```
+```bash
+python -m venv .venv --system-site-packages
+source .venv/bin/activate
+pip install torch torchvision torchaudio gradio rwkv-fla accelerate deepspeed cupy
+git clone https://github.com/uniartisan/transformers.git
+cd ./transformers
+pip install . 
+```
+## Train model 😋
+- AMD complite Config '-xhip', '-fopenmp', '-ffast-math', '-O3', '--offload-arch=gfx1100','-munsafe-fp-atomics'
+- Nvidia complite Config '-res-usage', '--maxrregcount 60', '--use_fast_math', '-O3', '-Xptxas -O3'
+### Stage 1 
+- Training for Qwen 0.5B with Norm
+
+```bash
+sh train.sh -c configs/qwen_0.5b.yaml -l 0.0001 -f 0.00001 -m 2048 -b 2 -r "[input_Raw_data_dir_1] [input_Raw_data_dir_2] [input_Raw_data_dir_3]..." -o [output_model_path]  -g 1 -F 0 -d 1 -t 1000_000_000 -T 0.2 -R v7 -s 1 -M 1
+```
+### Stage 2
+- Training for Qwen 0.5B with Norm
+```bash
+sh train.sh -c configs/qwen_0.5b.yaml -l 0.0001 -f 0.00001 -m 2048 -b 2 -r "[input_Raw_data_dir_1] [input_Raw_data_dir_2] [input_Raw_data_dir_3]..." -o [Stage_1_output_model_dir]  -g 1 -F 0 -d 1 -t 1000_000_000 -T 0.2 -R v7 -s 2 -k [output_deepspeed_model_weight_dir] -M 1
+```
+
+- Training for Qwen 0.5B with Norm and freez mlp
+```bash
+sh train.sh -c configs/qwen_0.5b.yaml -l 0.0001 -f 0.00001 -m 2048 -b 2 -r "[input_Raw_data_dir_1] [input_Raw_data_dir_2] [input_Raw_data_dir_3]..." -o [Stage_1_output_model_dir]  -g 1 -F 0 -d 1 -t 1000_000_000 -T 0.2 -R v7 -s 2 -k [output_deepspeed_model_weight_dir] -M 1 -z 1
+```
+
+- Training for Qwen 0.5B with Norm and freez mlp and use another teacher model
+```bash
+sh train.sh -c configs/qwen_0.5b.yaml -l 0.0001 -f 0.00001 -m 2048 -b 2 -r "[input_Raw_data_dir_1] [input_Raw_data_dir_2] [input_Raw_data_dir_3]..." -o [Stage_1_output_model_dir]  -g 1 -F 0 -d 1 -t 1000_000_000 -T 0.2 -R v7 -s 2 -k [output_deepspeed_model_weight_dir] -M 1 -z 1 -i [Another_Instruct_teacher_model_dir_with_config]
+```
+
+[Jump to document describes the usage of the `train.sh` script for model training with DeepSpeed](./Train.md)
+
+#### Because cupy only supports up to ROCm5.0, it cannot be trained on AMDGPU, but ROCM Pytorch can be used for infrence.
+
+# Infrence on Nvidia GPU 🚀
+
+## prepare model
+1. convert deepspeed model to hf format 
+```bash
+python test/convert_2_hf.py --config_file [input_config_file] --ckpt_file [input_deepspeed_model_weight_dir] --output_config_dir [output_config_dir]
+```
+
+## Test model
+1. test chat in cli
+```bash
+python ./test/test_chat_cli.py [model_config_dir]
+```
+2. test test caht in gradio with thinking
+```bash
+python ./test/test_hf_gradio_thinking.py [model_config_dir]
+```
+3. test chat in gradio with fp16
+```bash
+python ./test/test_hf_gradio.py [model_config_dir]
+```
+4. test by a single prompt with fp16
+```bash
+python ./test/test_hf.py [model_config_dir]
+```
+
+# Infrence on AMD Radeon GPU (Test on Ubuntu 24.04 with W7900 & RX6750xt)🚀
+1. [install ROCM Doc on Official Documentation](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/install/install-methods/package-manager-index.html)
+2. Build Environment
+```bash
+sudo apt install python3.12-venv
+```
+```bash
+python -m venv .venv --system-site-packages
+source .venv/bin/activate
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2.4
+pip install gradio rwkv-fla accelerate deepspeed cupy
+git clone https://github.com/uniartisan/transformers.git
+cd ./transformers
+pip install . 
+```
+## prepare model
+1. convert deepspeed model to hf format 
+```bash
+python test/convert_2_hf.py --config_file [input_config_file] --ckpt_file [input_deepspeed_model_weight_dir] --output_config_dir [output_config_dir]
+```
+
+## Test model
+1. test chat in cli
+```bash
+python ./test/test_chat_cli.py [model_config_dir]
+```
+2. test test caht in gradio with thinking
+```bash
+python ./test/test_hf_gradio_thinking.py [model_config_dir]
+```
+3. test chat in gradio with fp16
+```bash
+python ./test/test_hf_gradio.py [model_config_dir]
+```
+4. test by a single prompt with fp16
+```bash
+python ./test/test_hf.py [model_config_dir]

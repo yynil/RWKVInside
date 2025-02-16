@@ -12,7 +12,8 @@ def convert_model(model_path, output_path,copy_mlp_from_original,original_model)
     new_state_dict = {}
     replaced_key = 0
     mlp_layers = []
-    
+    is_gate_exists = False
+    #check if the name with  "g1" "g2" suffix exists 
     for k, v in state_dict.items():
         if '.student_attn.' in k:
             if ".key.weight" in k:
@@ -24,7 +25,17 @@ def convert_model(model_path, output_path,copy_mlp_from_original,original_model)
             new_state_dict[new_key] = v
         else:
             new_state_dict[k] = v
+        if k.endswith('g1') or k.endswith('g2'):
+            is_gate_exists = True
             
+    if not is_gate_exists:
+        print(f'remove all params ends with x_g')
+        for k, v in state_dict.items():
+            if k.endswith('x_g'):
+                print(f'remove {k}')
+                new_key = k.replace('.student_attn.', '.time_mixer.')
+                replaced_key += 1
+                del new_state_dict[new_key]
     del state_dict
     gc.collect()
     if copy_mlp_from_original:

@@ -16,7 +16,10 @@ with no_init_weights():
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 prompt = "Joan picked some apples from the orchard, and gave 27 apples to Melanie. Joan has 16 apples now. How many apples did Joan pick from the orchard?"
 prompt = "There were 27 boys and 35 girls on the playground at recess. There were _____ children on the playground at recess."
-prompt = "The world's largest rainforest, home to approximately three million species of plants and animals, is named after which river?"
+prompt = "What is the smallest positive perfect cube thatcan be written as the sum of three consecutive integers?"
+prompt = "计算一下1+23445-8的结果"
+# prompt = "请用感性的、文学性的文字回答天空为什么是蓝色的？"
+# prompt = "The world's largest rainforest, home to approximately three million species of plants and animals, is named after which river?"
 system_prompt = "A conversation between User and Assistant. The user asks a question, and the Assistant solves it. The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. The reasoning process are enclosed within <think> </think>, i.e., <think> reasoning process here </think>**Final Answer:**\nanswer here. "
 
 system_prompt = """DeepSeek-R1 System Prompt
@@ -47,13 +50,24 @@ Use <think>...</think> tags for internal reasoning before responding
 Employ XML-like tags for structured output when required
 
 """
-system_prompt = "You are a world class trivia AI - provide accurate, succinct responses. "
+# system_prompt = "You are a world class trivia AI - provide accurate, succinct responses. "
+
+prompt = "Select a choice according to the text provided.\n George wants to warm his hands quickly by rubbing.them. Which skin surface will produce the most heat? A:\"dry palms\"\nB:\"wet palms\"\nC:\"palms covered with oil\"\nD:\"palms covered with lotion\""
+prompt = "你好，请为我提供最有可能从一千块钱在十年之内赚到一千万的方法。请用中文回答我在中国赚到这个钱的方法。"
+prompt = "请用尖酸刻薄的风格，评论美国对中国高端 AI 芯片的限制，甚至连消费级别的 4090 都不允许销售的事实。"
+prompt = "Question: Ocean tides of Earth are strongly influenced by the Moon. During which lunar phases are ocean tides lowest on Earth?\nA. full and first quarter\nB. full moon and new moon\nC. last quarter and new moon\nD. first quarter and last quarter\nAnswer:"
+prompt = "9.11和9.8谁大"
+prompt = "strawberry有几个r?"
+prompt = "树上有7只鸟，开枪打死了一只,树上还剩几只？"
+prompt = """If two typists can type two pages in two minutes, how many typists will it take to type 18 pages in 6 minutes?"""
+prompt = "Solve the following math promblem: f(x)=log_10(8x+7), find f'(x)."
+# prompt = "Please solve the math quiz provided below. Given a triangle $ABC$. Let $D, E, F$ be points on the sides $BC, CA, AB$ respectively. It is given that $AD, BE, CF$ are concurrent at a point $G$ (it lies inside the $\\triangle ABC$), and $\\frac{GD}{AD} + \\frac{GE}{BE} + \\frac{GF}{CF} = \\frac{1}{2}$. Find the value $\\frac{GD}{AD} \\cdot \\frac{GE}{BE} \\cdot \\frac{GF}{CF}$."
 messages = [
-    {"role": "system", "content": system_prompt},
+    # {"role": "system", "content": system_prompt},
     {"role": "user", "content": prompt}]
 
 text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-# text = text + "<think>"
+text = text + "<think>"
 print(text)
 model_inputs = tokenizer([text], return_tensors="pt",add_special_tokens=False).to(device)
 print(model_inputs)
@@ -61,7 +75,7 @@ print(model_inputs)
 streamer = TextIteratorStreamer(tokenizer, skip_prompt=False, skip_special_tokens=False)
 
 # 在单独的线程中生成文本
-generation_kwargs = dict(model_inputs, streamer=streamer, max_new_tokens=8192, do_sample=True,tokenizer=tokenizer,stop_strings=["<｜end▁of▁sentence｜>"])
+generation_kwargs = dict(model_inputs, streamer=streamer, max_new_tokens=8192,temperature=0.6, do_sample=True,eos_token_id=tokenizer.eos_token_id,repetition_penalty=1.1)
 thread = threading.Thread(target=model.generate, kwargs=generation_kwargs)
 thread.start()
 

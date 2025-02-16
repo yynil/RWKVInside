@@ -188,8 +188,8 @@ pip install .
 ```
 
 ## Train model 😋
-- AMD complite Config '-xhip', '-fopenmp', '-ffast-math', '-O3', '--offload-arch=gfx1100','-munsafe-fp-atomics'
-- Nvidia complite Config '-res-usage', '--maxrregcount 60', '--use_fast_math', '-O3', '-Xptxas -O3'
+- AMD hipcc Compile extra_cuda_cflags: '-xhip', '-fopenmp', '-ffast-math', '-O3', '--offload-arch=gfx1100','-munsafe-fp-atomics'
+- Nvidia nvcc Compile extra_cuda_cflags: '-res-usage', '--maxrregcount 60', '--use_fast_math', '-O3', '-Xptxas -O3'
 
 ### Stage 1 
 - Training for Qwen 0.5B with Norm
@@ -215,8 +215,26 @@ sh train.sh -c configs/qwen_0.5b.yaml -l 0.0001 -f 0.00001 -m 2048 -b 2 -r "[inp
 
 [Jump to document describes the usage of the `train.sh` script for model training with DeepSpeed](./Train.md)
 ### If you want to train on AMD GPU (Test passed on Ubuntu 24.04 with W7900)🤯
-#### 1. Because cupy only supports up to ROCm5.0 so we need to remove “impot cupy”
-#### 2. Modify ./cuda/wkv7_cuda.cu 
+#### 1. [install ROCM Doc on Official Documentation](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/install/install-methods/package-manager-index.html)
+#### 2. Build Environment
+```bash
+sudo apt install python3.12-venv
+```
+```bash
+python -m venv .venv --system-site-packages
+source .venv/bin/activate
+```
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2.4
+pip install gradio rwkv-fla accelerate deepspeed cupy
+```
+```bash
+git clone https://github.com/uniartisan/transformers.git
+cd ./transformers
+pip install . 
+```
+#### 3. Because cupy only supports up to ROCm5.0 so we need to remove “impot cupy”
+#### 4. Modify ./cuda/wkv7_cuda.cu 
 ```cpp
 using bf = __nv_bfloat16;
 __device__ inline float to_float(const bf & u) { return __bfloat162float(u); }
@@ -228,7 +246,17 @@ using bf = __nv_bfloat16;
 __device__ inline float to_float(const bf & u) { return __bfloat162float(u); }
 __device__ inline bf to_bf(const float & u) { return __float2bfloat16(u); }
 ```
-#### 3. Change All deepspeed ```backend='nccl'``` to ```backend='rccl'``` in ./train_scripts/train_hybrid_deepspeed.py 
+#### 5. Change All deepspeed ```backend='nccl'``` to ```backend='rccl'``` in ./train_scripts/train_hybrid_deepspeed.py 
+#### 6.Change All 
+```python
+extra_cuda_cflags=[f'-D_C_={HEAD_SIZE}',"-res-usage", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization"
+```
+to
+```python
+[f'-D_C_={HEAD_SIZE}', f"-D_CHUNK_LEN_={CHUNK_LEN}", '-xhip', '-fopenmp', '-ffast-math', '-O3', '--offload-arch=gfx1100','-munsafe-fp-atomics']
+```
+in ```./rwkv_inside/TimeMixer.py```
+
 # Infrence on Nvidia GPU 🚀
 
 ## prepare model

@@ -249,7 +249,7 @@ __device__ inline bf to_bf(const float & u) { return __float2bfloat16(u); }
 #### 5. Change All deepspeed ```backend='nccl'``` to ```backend='rccl'``` in ./train_scripts/train_hybrid_deepspeed.py 
 #### 6.Change All 
 ```python
-extra_cuda_cflags=[f'-D_C_={HEAD_SIZE}',"-res-usage", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization"
+extra_cuda_cflags=[f'-D_C_={HEAD_SIZE}',"-res-usage", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization"]
 ```
 to
 ```python

@@ -214,6 +214,13 @@ sh train.sh -c configs/qwen_0.5b.yaml -l 0.0001 -f 0.00001 -m 2048 -b 2 -r "[inp
 ```
 
 [Jump to document describes the usage of the `train.sh` script for model training with DeepSpeed](./Train.md)
+
+### Save checkpoint 
+
+```bash
+python ./train_scripts/save_checkpoint.py [checkpoint_dir] [output_dir]
+```
+
 ### If you want to train on AMD GPU (Test passed on Ubuntu 24.04 with W7900)🤯
 #### 1. [install ROCM Doc on Official Documentation](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/install/install-methods/package-manager-index.html)
 #### 2. Build Environment
@@ -226,7 +233,7 @@ source .venv/bin/activate
 ```
 ```bash
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.2.4
-pip install gradio rwkv-fla accelerate deepspeed cupy
+pip install gradio rwkv-fla accelerate deepspeed 
 ```
 ```bash
 git clone https://github.com/uniartisan/transformers.git
@@ -260,9 +267,15 @@ in ```./rwkv_inside/TimeMixer.py```
 # Infrence on Nvidia GPU 🚀
 
 ## prepare model
-1. convert deepspeed model to hf format 
+1. convert deepspeed model to pytorch format  
+
 ```bash
-python test/convert_2_hf.py --config_file [input_config_file] --ckpt_file [input_deepspeed_model_weight_dir] --output_config_dir [output_config_dir]
+python ./train_scripts/convert_pt.py --model_path [input_model_dir_path] --output_path [output_model_dir_path] --original_model_path [dir_of_the_original_qwen_model]
+```
+2. convert pytorch model to hf format for Infrence
+
+```bash
+python ./test/convert_2_hf.py --config_file [input_config_file] --ckpt_file [input_deepspeed_model_weight_dir] --output_config_dir [output_config_dir]
 ```
 
 ## Test model

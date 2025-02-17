@@ -443,18 +443,19 @@ class GRPOTrainer:
             raise
     @time_function
     def _prepare_old_logps(self, prompt_inputs, generations):
-        generation_logits = torch.cat([logit.unsqueeze(1) for logit in generations.logits], dim=1)
-        generations = generations.sequences#B*self.args.num_generations,T+GENERATION_LENGTH
-        prompt_length = prompt_inputs["input_ids"].size(1)
-        completion_ids = generations[:, prompt_length:]#B*self.args.num_generations,GENERATION_LENGTH
-        logits_to_keep = completion_ids.size(1) #GENERATION_LENGTH
-        generation_logits = generation_logits[:, -logits_to_keep:]#B,GENERATION_LENGTH,V
-        old_logps = selective_log_softmax(generation_logits[:,-logits_to_keep:,:], generations[:,-logits_to_keep:])
-        if self.args.local_rank == 0:
-            logger.debug(f'old_logits shape {generation_logits.shape},old_logps shape {old_logps.shape},require grad {old_logps.requires_grad},old_logits require grad {generation_logits.requires_grad}')
-        completions = self.tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
-        if self.args.local_rank == 0:
-            logger.debug(f"Completions: {completions}")
+        with torch.no_grad():
+            generation_logits = torch.cat([logit.unsqueeze(1) for logit in generations.logits], dim=1)
+            generations = generations.sequences#B*self.args.num_generations,T+GENERATION_LENGTH
+            prompt_length = prompt_inputs["input_ids"].size(1)
+            completion_ids = generations[:, prompt_length:]#B*self.args.num_generations,GENERATION_LENGTH
+            logits_to_keep = completion_ids.size(1) #GENERATION_LENGTH
+            generation_logits = generation_logits[:, -logits_to_keep:]#B,GENERATION_LENGTH,V
+            old_logps = selective_log_softmax(generation_logits[:,-logits_to_keep:,:], generations[:,-logits_to_keep:])
+            if self.args.local_rank == 0:
+                logger.debug(f'old_logits shape {generation_logits.shape},old_logps shape {old_logps.shape},require grad {old_logps.requires_grad},old_logits require grad {generation_logits.requires_grad}')
+            completions = self.tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
+            if self.args.local_rank == 0:
+                logger.debug(f"Completions: {completions}")
         return generations,completion_ids,logits_to_keep,old_logps,completions
 
     def _prepare_ref_logps(self, generations, logits_to_keep):

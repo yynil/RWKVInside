@@ -123,7 +123,7 @@ def validate_think_tags(completion: str) -> Tuple[float, int]:
         
     # 根据有效思考段落数计算得分
     if valid_segments > 0:
-        reward = 0.2 * min(valid_segments, 3)  # 最多计算3段
+        reward = 0.2 
         
     return reward, valid_segments
 

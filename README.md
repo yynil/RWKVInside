@@ -337,3 +337,48 @@ python ./test/test_hf_gradio.py [model_config_dir]
 4. test by a single prompt with fp16
 ```bash
 python ./test/test_hf.py [model_config_dir]
+```
+
+# Infrence on AMD Radeon GPU By Llama.cpp
+
+```bash
+git clone https://github.com/MollySophia/llama.cpp.git -b rwkv-v7
+cd llama.cpp
+HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
+    cmake -S . -B build -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1030 -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build build --config Release -- -j 16
+cd ./build/bin 
+```
+### transform safetensor model to gguf 
+```bash
+python ./convert_hf_to_gguf.py [model_dir]
+```
+### model Quantization
+```bash
+./llama-quantize [model_dir] [Quantization accuracy]
+```
+### Infrence model in Webui By llama-server
+```bash
+/llama-server -m [model_dir] -t [use_cpu_thread_number] -ngl 99 --host [host_number] --port [port_number]
+```
+```Radeon 7000 series use gfx1100 & Radeon 6000 series use gfx1030```
+# Infrence on Nvidia GPU By Llama.cpp
+```bash
+git clone https://github.com/MollySophia/llama.cpp.git -b rwkv-v7
+cd llama.cpp
+cmake -B build -DGGML_CUDA=ON
+cmake --build build --config Release
+cd ./build/bin 
+```
+### transform safetensor model to gguf 
+```bash
+python ./convert_hf_to_gguf.py [model_dir]
+```
+### model Quantization
+```bash
+./llama-quantize [model_dir] [Quantization_accuracy]
+```
+### Infrence model in Webui By llama-server
+```bash
+/llama-server -m [model_dir] -t [use_cpu_thread_number] -ngl 99 --host [host_number] --port [port_number]
+```

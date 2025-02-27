@@ -1,4 +1,7 @@
 # RWKVInside
+Currently, our research focuses on RNNs in large language models (LLMs). We’re interested in exploring how to adapt transformer-based models, such as the 671B R1, to incorporate RNN attention and hybrid approaches, aiming to enhance expressive power and long-context capabilities in latent space. You can check out our ongoing work on ARWKV here.
+
+https://huggingface.co/papers/2501.15570
 
 # HybridModel Overview
 

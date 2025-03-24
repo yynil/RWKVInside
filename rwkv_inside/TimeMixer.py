@@ -163,7 +163,7 @@ class RWKV_Tmix_x070(torch.nn.Module):
             # D_GATE_LORA = max(32, int(round(  (0.6*(C**0.8))  /32)*32)) # suggestion
             # Note: for some data, you can reduce D_GATE_LORA or even remove this gate
             if not self.gate_free:
-                self.g1 = nn.Parameter(torch.ones(C, D_GATE_LORA))
+                self.g1 = nn.Parameter(torch.ones(C, D_GATE_LORA)* 10.0)
                 self.g2 = nn.Parameter(torch.ones(D_GATE_LORA, C))
 
             self.k_k = nn.Parameter(torch.ones(1,1,C)*0.85)

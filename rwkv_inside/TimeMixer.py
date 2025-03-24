@@ -163,8 +163,8 @@ class RWKV_Tmix_x070(torch.nn.Module):
             # D_GATE_LORA = max(32, int(round(  (0.6*(C**0.8))  /32)*32)) # suggestion
             # Note: for some data, you can reduce D_GATE_LORA or even remove this gate
             if not self.gate_free:
-                self.g1 = nn.Parameter(torch.ones(C, D_GATE_LORA)* 10.0)
-                self.g2 = nn.Parameter(torch.ones(D_GATE_LORA, C))
+                self.g1 = nn.Parameter(torch.zeros(C, D_GATE_LORA))
+                self.g2 = nn.Parameter(torch.zeros(D_GATE_LORA, C))
 
             self.k_k = nn.Parameter(torch.ones(1,1,C)*0.85)
             self.k_a = nn.Parameter(torch.ones(1,1,C))
@@ -216,7 +216,9 @@ class RWKV_Tmix_x070(torch.nn.Module):
         #     print(f'MASTER pid is {os.getpid()} has_norm:{self.has_group_norm} v_first: {v_first_mean} at layer {self.layer_id}')
         a = torch.sigmoid(self.a0 + (xa @ self.a1) @ self.a2) # a is "in-context learning rate"
         if not self.gate_free:
-            g = torch.sigmoid(xg @ self.g1) @ self.g2
+            g_delta = torch.sigmoid(xg @ self.g1) @ self.g2
+            g = 1.0 + g_delta
+            # g = torch.sigmoid(xg @ self.g1) @ self.g2
         kk = k * self.k_k
         kk = F.normalize(kk.view(B,T,H,-1), dim=-1, p=2.0).view(B,T,C)
         k = k * (1 + (a-1) * self.k_a)

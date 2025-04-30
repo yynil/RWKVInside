@@ -2,8 +2,6 @@ import deepspeed
 import torch
 import torch.nn.functional as F
 import logging
-import cupy as cp
-from cupy.cuda import nccl
 import json
 import torch
 from torch.optim import Adam

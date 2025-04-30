@@ -101,7 +101,6 @@ def create_arg_parser():
     parser.add_argument('--optim',type=str,default='adam',help='optimizer')
     parser.add_argument('--train_type', type=str, default='', help='train type')
     parser.add_argument('--skip_steps',type=int,default=0,help='skip steps in the peft checkpoint')
-    parser.add_argument('--full_params',action='store_true',help='full params update',default=False)
     parser.add_argument('--ckpt_file', type=str, default=None, help='checkpoint file')
     parser.add_argument('--ckpt_dir', type=str, default=None, help='checkpoint directory')
     parser.add_argument('--ckpt_id', type=str, default=None, help='checkpoint id')

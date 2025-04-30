@@ -29,7 +29,7 @@ TEACHER_MODEL_ID=""
 GATE_FREE=""
 NEED_TO_PAD=""
 MAX_EPOCHES=1
-while getopts "c:o:p:n:m:b:a:l:f:w:k:g:d:F:s:R:W:S:t:T:W:P:r:G:M:z:i:D:e:N:X:" opt; do
+while getopts "c:o:p:n:m:b:a:l:f:w:k:g:d:s:R:W:S:t:T:W:P:r:G:M:z:i:D:e:N:X:" opt; do
     case $opt in
         c) CONFIG_FILE="$OPTARG";;
         o) OUTPUT_DIR="$OPTARG";;
@@ -45,7 +45,6 @@ while getopts "c:o:p:n:m:b:a:l:f:w:k:g:d:F:s:R:W:S:t:T:W:P:r:G:M:z:i:D:e:N:X:" o
         k) CKPT_FILE="--ckpt_file $OPTARG";;
         g) GRAD_CP="$OPTARG";;
         d) DEEPSPEED_OFFLOAD="--deepspeed_offload";;
-        F) FULL_PARAMS="--full_params";;
         s) STAGE="$OPTARG";;
         R) export RWKV_VERSION="$OPTARG";;
         W) export WKV="$OPTARG";;

@@ -1,12 +1,14 @@
 import sys
 import os
 from typing import Optional, Tuple
-RWKV_VERSION=os.environ.get('RWKV_VERSION','v7')
-is_rwkv_7 = RWKV_VERSION == 'v7'
-if is_rwkv_7 :
-    from TimeMixer import RWKV_Tmix_x070 as TimeMixer
-else:
-    from TimeMixer import RWKV_Tmix_x060 as TimeMixer
+# RWKV_VERSION=os.environ.get('RWKV_VERSION','v7')
+# is_rwkv_7 = RWKV_VERSION == 'v7'
+# if is_rwkv_7 :
+#     from TimeMixer import RWKV_Tmix_x070 as TimeMixer
+# else:
+#     from TimeMixer import RWKV_Tmix_x060 as TimeMixer
+#Now we only support v7 and faciliate rwkvfla only
+from TimeMixer import RWKV_Tmix_x070 as TimeMixer
 import torch
 import torch.nn as nn
 
@@ -69,15 +71,9 @@ class AttentionWrapper(nn.Module):
         # print(f"AttentionWrapper: layer_idx={self.layer_idx}, attention_mask={self.attention_mask}")
         # print(f"kargs={kwargs}")
         if self.args.grad_cp == 1:
-            if is_rwkv_7:
-                student_hidden_states,v_first = deepspeed.checkpointing.checkpoint(self.student_attn, hidden_states, v_first, self.attention_mask)
-            else:
-                student_hidden_states = deepspeed.checkpointing.checkpoint(self.student_attn, hidden_states)
+            student_hidden_states,v_first = deepspeed.checkpointing.checkpoint(self.student_attn, hidden_states, v_first, self.attention_mask)
         else:
-            if is_rwkv_7:
-                student_hidden_states,v_first = self.student_attn(hidden_states, v_first, self.attention_mask)
-            else:
-                student_hidden_states = self.student_attn(hidden_states)
+            student_hidden_states,v_first = self.student_attn(hidden_states, v_first, self.attention_mask)
         self.v_first_state.shared_state.data[self.global_rank].copy_(v_first)
         if self.args.stage != 1:
             return (student_hidden_states, None)
